@@ -76,10 +76,9 @@ public class BlobReferenceResolver implements AutoCloseable {
    * @throws IOException if reading the blob fails
    */
   public byte[] resolve(BlobReference ref) throws IOException {
-    Dataset dataset = getOrOpenDataset(ref.getDatasetUri());
     List<Long> rowAddresses = new ArrayList<>(1);
     rowAddresses.add(ref.getRowAddress());
-    List<BlobFile> blobs = dataset.takeBlobs(rowAddresses, ref.getColumnName());
+    List<BlobFile> blobs = takeBlobs(ref.getDatasetUri(), rowAddresses, ref.getColumnName());
     try {
       if (blobs.isEmpty()) {
         return new byte[0];
@@ -137,9 +136,8 @@ public class BlobReferenceResolver implements AutoCloseable {
     // Resolve each group with a single takeBlobs() call over its distinct addresses, then fan the
     // bytes back out to every vector index that referenced that address.
     for (Group group : groups.values()) {
-      Dataset dataset = getOrOpenDataset(group.datasetUri);
       List<Long> addresses = group.distinctAddresses; // requested order
-      List<BlobFile> blobs = dataset.takeBlobs(addresses, group.columnName);
+      List<BlobFile> blobs = takeBlobs(group.datasetUri, addresses, group.columnName);
 
       // Every handle takeBlobs returned is released in the finally below, including on the two
       // throws: BlobFile wraps a native handle with no cleaner, so an abandoned one is only
@@ -176,6 +174,10 @@ public class BlobReferenceResolver implements AutoCloseable {
       }
     }
     return resolved;
+  }
+
+  List<BlobFile> takeBlobs(String datasetUri, List<Long> addresses, String columnName) {
+    return getOrOpenDataset(datasetUri).takeBlobs(addresses, columnName);
   }
 
   private Dataset getOrOpenDataset(String datasetUri) {
