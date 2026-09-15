@@ -65,4 +65,4 @@ Spark plans `SEARCH` as a batch read carrying the full-text query as a scan opti
 
 ## Validation
 
-`SEARCH` has no passing end-to-end coverage today: the Docker integration test is marked `xfail` and the JVM test is `@Disabled`, both pending structured full-text query support in lance-core. [`VECTOR_SEARCH`](vector-search.md) and [`HYBRID_SEARCH`](hybrid-search.md) remain covered by the `Spark Search Docker` workflow.
+The `Spark Search Docker` workflow exercises `SEARCH` against directory and REST-directory namespaces. The Docker test still carries an `xfail` marker, but it can pass as `XPASS`; the JVM `SEARCH` cases remain `@Disabled`. [`VECTOR_SEARCH`](vector-search.md) and [`HYBRID_SEARCH`](hybrid-search.md) are also exercised by the workflow.
