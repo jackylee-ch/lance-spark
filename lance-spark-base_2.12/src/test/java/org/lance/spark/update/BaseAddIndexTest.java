@@ -1728,6 +1728,29 @@ public abstract class BaseAddIndexTest {
   }
 
   @Test
+  public void testDropMissingIndexNamesTableAndIndex() {
+    prepareDataset();
+
+    // Without the wrapper, lance-core's message is
+    // "Lance index not found: name=no_such_idx, .../rust/lance/src/index.rs:1640:24" — it names
+    // the index but not the table.
+    Exception exception =
+        Assertions.assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .sql(String.format("alter table %s drop index no_such_idx", fullTable))
+                    .collectAsList());
+
+    Assertions.assertTrue(
+        hasMessageInCauseChain(exception, "no_such_idx"),
+        "error should name the index, got: " + exception.getMessage());
+    Assertions.assertTrue(
+        hasMessageInCauseChain(exception, tableName),
+        "error should name the table, got: " + exception.getMessage());
+  }
+
+  @Test
   public void testDropIndexThenRecreate() {
     prepareDataset();
 
