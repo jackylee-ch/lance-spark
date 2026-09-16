@@ -9,7 +9,13 @@ Run Lance full-text search from Spark SQL using Lance namespace execution.
     `SEARCH` resolves the `table` argument through a Spark catalog. Use a Lance namespace catalog table such as `lance.default.documents`, not a raw Lance dataset path.
 
 !!! note "Named Arguments Required"
-    `search_columns` is required and has no positional slot, so `SEARCH` must be called with named arguments. Named arguments require Spark 3.5 or later, so `SEARCH` is not available on Spark 3.4.
+    `search_columns` is required and has no positional slot, so `SEARCH` must be called with named arguments. Named arguments require Spark 3.5 or later. On Spark 3.4 the function is registered but cannot be called.
+
+!!! warning "Full-text search is not supported on the server-side route yet"
+    A namespace that implements `queryTable` — a directory namespace, for example — takes the
+    server-side route described in [Execution](#execution). That route does not run the structured
+    full-text query, so the `_score` column the plan projects and sorts by cannot be produced and
+    the query fails.
 
 ## Basic Usage
 
@@ -65,4 +71,4 @@ Spark plans `SEARCH` as a batch read carrying the full-text query as a scan opti
 
 ## Validation
 
-The `Spark Search Docker` workflow exercises `SEARCH` against directory and REST-directory namespaces. The Docker test still carries an `xfail` marker, but it can pass as `XPASS`; the JVM `SEARCH` cases remain `@Disabled`. [`VECTOR_SEARCH`](vector-search.md) and [`HYBRID_SEARCH`](hybrid-search.md) are also exercised by the workflow.
+The `Spark Search Docker` workflow covers `SEARCH`, [`VECTOR_SEARCH`](vector-search.md) and [`HYBRID_SEARCH`](hybrid-search.md) against directory and REST-directory namespaces. The `SEARCH` cases are currently expected to fail, for the reason given at the top of this page.
