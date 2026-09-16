@@ -43,9 +43,7 @@ case class LanceDropIndexExec(
     try {
       dataset.dropIndex(indexName)
     } catch {
-      // lance-core reports a missing index as a bare RuntimeException whose message names the
-      // index and its own Rust source path but not the table, so a session working over several
-      // tables cannot tell which one was meant. Keep the cause and lead with both identifiers.
+      // Add table context while preserving the underlying Lance error.
       case e: Exception =>
         throw new RuntimeException(
           s"DROP INDEX failed for index '$indexName' on table ${ident.toString}",

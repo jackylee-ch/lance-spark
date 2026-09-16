@@ -1731,9 +1731,6 @@ public abstract class BaseAddIndexTest {
   public void testDropMissingIndexNamesTableAndIndex() {
     prepareDataset();
 
-    // Without the wrapper, lance-core's message is
-    // "Lance index not found: name=no_such_idx, .../rust/lance/src/index.rs:1640:24" — it names
-    // the index but not the table.
     Exception exception =
         Assertions.assertThrows(
             Exception.class,
