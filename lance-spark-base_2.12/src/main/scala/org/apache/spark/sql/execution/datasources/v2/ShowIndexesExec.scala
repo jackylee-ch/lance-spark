@@ -24,13 +24,6 @@ import org.lance.spark.utils.{FieldPathUtils, Utils}
 
 import scala.collection.JavaConverters._
 
-object ShowIndexesExec {
-  private val SystemIndexNames = Set("__lance_frag_reuse", "__lance_mem_wal")
-
-  private def isSystemIndex(indexName: String): Boolean =
-    indexName != null && SystemIndexNames.exists(_.equalsIgnoreCase(indexName))
-}
-
 /**
  * Physical execution of SHOW INDEXES for Lance datasets.
  *
@@ -54,14 +47,14 @@ case class ShowIndexesExec(
     val dataset = Utils.openDatasetBuilder(readOptions).build()
     try {
       val indexes = dataset.getIndexes.asScala.toSeq
-        .filterNot(idx => ShowIndexesExec.isSystemIndex(idx.name()))
+        .filterNot(idx => IndexUtils.isSystemIndex(idx.name()))
         .groupBy(_.name())
         .toSeq
         .sortBy(_._1)
-        .map(_._2.head)
       val lanceSchema = dataset.getLanceSchema()
 
-      indexes.map { idx =>
+      indexes.map { case (_, indexSegments) =>
+        val idx = indexSegments.head
         val fieldIds = idx.fields()
         val fieldNamesArray =
           if (fieldIds == null) {
@@ -98,6 +91,33 @@ case class ShowIndexesExec(
         val numUnindexedFragments = getLong("num_unindexed_fragments")
         val numUnindexedRows = getLong("num_unindexed_rows")
 
+        val indexedPercent: java.lang.Double =
+          if (numIndexedRows == null || numUnindexedRows == null) {
+            null
+          } else {
+            val total = numIndexedRows.longValue() + numUnindexedRows.longValue()
+            if (total <= 0L) {
+              null
+            } else {
+              val percent = 100.0 * numIndexedRows.longValue() / total
+              math.floor(percent * 100.0) / 100.0
+            }
+          }
+
+        val numSegments = {
+          val reported = getLong("num_segments")
+          if (reported != null) reported else getLong("num_indices")
+        }
+
+        val sizeBytes: java.lang.Long = {
+          val perSegment = indexSegments.map(segment => segment.getSizeBytes)
+          if (perSegment.exists(!_.isPresent)) {
+            null
+          } else {
+            perSegment.map(_.get.longValue()).sum
+          }
+        }
+
         new GenericInternalRow(Array[Any](
           UTF8String.fromString(name),
           fieldNamesArray,
@@ -105,7 +125,10 @@ case class ShowIndexesExec(
           numIndexedFragments,
           numIndexedRows,
           numUnindexedFragments,
-          numUnindexedRows))
+          numUnindexedRows,
+          indexedPercent,
+          numSegments,
+          sizeBytes))
       }
     } finally {
       dataset.close()

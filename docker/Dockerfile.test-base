@@ -14,8 +14,12 @@ RUN apt-get update && \
 
 RUN npm install -g azurite
 
-RUN curl -fL -o /usr/local/bin/minio https://dl.min.io/server/minio/release/linux-amd64/minio && \
-    chmod +x /usr/local/bin/minio
+# MinIO retired the standalone binaries at dl.min.io (that URL now returns HTTP 410) and
+# locked down the Docker Hub repo, so lift the server binary out of a quay.io image. Pinned
+# to the last community release rather than :latest so image builds stay reproducible, and
+# COPY --from picks the right architecture instead of the hard-coded linux-amd64 the download
+# used to force.
+COPY --from=quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z /usr/bin/minio /usr/local/bin/minio
 
 RUN python3 -m venv /opt/venv && \
     . /opt/venv/bin/activate && \
@@ -27,16 +31,13 @@ ENV SPARK_HOME="/opt/spark"
 ENV PYTHONPATH="${SPARK_HOME}/python:${PYTHONPATH}"
 ENV PATH="${SPARK_HOME}/sbin:${SPARK_HOME}/bin:${PATH}"
 
-ARG SPARK_DOWNLOAD_VERSION=4.0.0
-ARG SPARK_MAJOR_VERSION=4.0
-ARG SCALA_VERSION=2.13
 ARG PY4J_VERSION=0.10.9.9
-ARG SPARK_SCALA_SUFFIX=
 
 ENV PYTHONPATH="${SPARK_HOME}/python/lib/py4j-${PY4J_VERSION}-src.zip:${PYTHONPATH}"
 
+# Spark is fetched and cached by the host/CI so Docker layer-cache misses
+# do not require another download from archive.apache.org.
+COPY spark.tgz /tmp/spark.tgz
 RUN mkdir -p ${SPARK_HOME} \
-    && curl -fL https://archive.apache.org/dist/spark/spark-${SPARK_DOWNLOAD_VERSION}/spark-${SPARK_DOWNLOAD_VERSION}-bin-hadoop3${SPARK_SCALA_SUFFIX}.tgz \
-       -o spark.tgz \
-    && tar xzf spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
-    && rm spark.tgz
+    && tar xzf /tmp/spark.tgz --directory ${SPARK_HOME} --strip-components 1 \
+    && rm /tmp/spark.tgz
