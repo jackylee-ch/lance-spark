@@ -40,8 +40,10 @@ import java.util.Map;
  * deduplicate addresses before calling it — a one-to-many JOIN (this feature's primary target)
  * repeats the same source row across many output rows, so reading each distinct blob once both
  * avoids redundant reads and removes any reliance on how takeBlobs treats repeated addresses. A
- * returned-count mismatch (e.g. a null-descriptor row that take silently drops) is treated as a
- * hard error rather than risking a positional skew that would write the wrong bytes downstream.
+ * returned-count mismatch guards that contract rather than a reachable case: on the pinned Lance
+ * version a null-descriptor row comes back as a {@code null} in place and leaves the count
+ * unchanged, while a deleted row makes take error out. It is treated as a hard error rather than
+ * risking a positional skew that would write the wrong bytes downstream.
  *
  * <p>Source datasets are opened through {@link Utils#openDatasetBuilder(LanceSparkReadOptions)}
  * using the per-source {@link BlobSourceContext} captured on the driver (keyed by dataset URI).
@@ -143,9 +145,11 @@ public class BlobReferenceResolver implements AutoCloseable {
       // throws: BlobFile wraps a native handle with no cleaner, so an abandoned one is only
       // reclaimed when the JVM exits, and Spark retries the task in the same JVM.
       try {
-        // takeBlobs must return exactly one BlobFile per requested address, in order. A mismatch
-        // means the selection hit deleted/null-descriptor rows, in which case positional mapping
-        // would skew and silently write the wrong bytes into the target table — fail loudly.
+        // takeBlobs must return exactly one BlobFile per requested address, in order. This guards
+        // that contract rather than a case the pinned Lance version can produce: a null-descriptor
+        // row arrives as a null in place and a deleted row makes take error out, so neither shifts
+        // the count. Were a mismatch ever possible, positional mapping would skew and silently
+        // write the wrong bytes into the target table — fail loudly.
         if (blobs.size() != addresses.size()) {
           throw new IOException(
               String.format(
@@ -176,6 +180,7 @@ public class BlobReferenceResolver implements AutoCloseable {
     return resolved;
   }
 
+  /** Takes the blobs for the given addresses from the cached dataset. Visible for testing. */
   List<BlobFile> takeBlobs(String datasetUri, List<Long> addresses, String columnName) {
     return getOrOpenDataset(datasetUri).takeBlobs(addresses, columnName);
   }

@@ -50,15 +50,20 @@ class BlobReferenceResolverTest {
         addresses: JList[java.lang.Long],
         column: String): JList[BlobFile] = {
       val blobs = super.takeBlobs(uri, addresses, column)
-      acquired = blobs.asScala.filter(_ != null).toVector
-      assertTrue(acquired.nonEmpty)
-      acquired.foreach(blob => assertNotEquals(0L, handle(blob)))
+      // Snapshot this call only: resolveBatch calls takeBlobs once per (datasetUri, columnName)
+      // group, and the handles of earlier groups are already released by the time we get here.
+      val fresh = blobs.asScala.filter(_ != null).toVector
+      assertTrue(fresh.nonEmpty)
+      fresh.foreach(blob => assertNotEquals(0L, handle(blob)))
+      acquired ++= fresh
       afterTake(blobs)
       blobs
     }
 
-    def assertReleased(): Unit =
+    def assertReleased(): Unit = {
+      assertTrue(acquired.nonEmpty)
       acquired.foreach(blob => assertEquals(0L, handle(blob), "native blob handle leaked"))
+    }
 
     override def close(): Unit = {
       acquired.filter(blob => handle(blob) != 0L).foreach(_.close())
@@ -66,9 +71,9 @@ class BlobReferenceResolverTest {
     }
   }
 
-  private def withSource(nullable: Boolean = false)(
+  private def withSource(nullable: Boolean = false, name: String = "source.lance")(
       body: (String, JList[BlobReference]) => Unit): Unit = {
-    val uri = tempDir.resolve("source.lance").toString
+    val uri = tempDir.resolve(name).toString
     val field = new Field(
       "data",
       new FieldType(
@@ -166,6 +171,24 @@ class BlobReferenceResolverTest {
       resolver.assertReleased()
     } finally resolver.close()
   }
+
+  @Test
+  def multipleGroupsReleaseEveryGroupsHandles(): Unit =
+    withSource(name = "first.lance") { (_, firstRefs) =>
+      withSource(name = "second.lance") { (_, secondRefs) =>
+        val refs = (firstRefs.asScala ++ secondRefs.asScala).asJava
+        val resolver = new RecordingResolver(_ => ())
+        try {
+          val result = resolver.resolveBatch(indices(refs), refs)
+          assertEquals(6, result.size())
+          result.values().asScala.foreach(bytes => assertArrayEquals(data, bytes))
+          // Two sources means two groups, so the per-group finally has to run twice and the
+          // recorder has to observe both sets of handles, not just the last one.
+          assertEquals(6, resolver.acquired.size)
+          resolver.assertReleased()
+        } finally resolver.close()
+      }
+    }
 
   @Test
   def batchReadFailureReleasesAllHandles(): Unit = withSource() { (uri, refs) =>
