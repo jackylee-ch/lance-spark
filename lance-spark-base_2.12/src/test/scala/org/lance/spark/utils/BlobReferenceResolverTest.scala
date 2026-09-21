@@ -191,6 +191,40 @@ class BlobReferenceResolverTest {
     }
 
   @Test
+  def batchClosesEachBlobBeforeTheNextRead(): Unit = withSource() { (_, refs) =>
+    val resolver = new BlobReferenceResolver {
+      override def takeBlobs(
+          uri: String,
+          addresses: JList[java.lang.Long],
+          column: String): JList[BlobFile] = {
+        val blobs = super.takeBlobs(uri, addresses, column)
+        // Assert on the way in: a blob handed out earlier must already be closed, so the read
+        // loop never holds more than one reader open for a group.
+        new java.util.ArrayList[BlobFile](blobs) {
+          override def get(index: Int): BlobFile = {
+            (0 until index).foreach(j =>
+              assertEquals(0L, handle(super.get(j)), s"blob $j still open at read $index"))
+            super.get(index)
+          }
+        }
+      }
+    }
+    try {
+      assertEquals(3, resolver.resolveBatch(indices(refs), refs).size())
+    } finally resolver.close()
+  }
+
+  @Test
+  def singleNullBlobReportsColumnAndDataset(): Unit = withSource(nullable = true) { (_, refs) =>
+    val resolver = new BlobReferenceResolver
+    try {
+      val error = assertThrows(classOf[IOException], () => resolver.resolve(refs.get(1)))
+      assertTrue(error.getMessage.contains("takeBlobs returned a null blob"), error.getMessage)
+      assertTrue(error.getMessage.contains("column=data"), error.getMessage)
+    } finally resolver.close()
+  }
+
+  @Test
   def batchReadFailureReleasesAllHandles(): Unit = withSource() { (uri, refs) =>
     val resolver = new RecordingResolver(_ => deleteDataFiles(uri))
     try {

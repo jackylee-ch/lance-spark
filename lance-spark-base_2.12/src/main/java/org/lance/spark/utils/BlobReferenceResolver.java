@@ -85,7 +85,17 @@ public class BlobReferenceResolver implements AutoCloseable {
       if (blobs.isEmpty()) {
         return new byte[0];
       }
-      return blobs.get(0).read();
+      BlobFile blob = blobs.get(0);
+      if (blob == null) {
+        // Same guard and wording as resolveBatch: a null-descriptor row arrives as a null in
+        // place, and without this the method throws a context-free NPE instead of the IOException
+        // its signature declares.
+        throw new IOException(
+            String.format(
+                "takeBlobs returned a null blob for address %d (column=%s, dataset=%s)",
+                ref.getRowAddress(), ref.getColumnName(), ref.getDatasetUri()));
+      }
+      return blob.read();
     } finally {
       for (BlobFile blob : blobs) {
         CloseableUtil.closeQuietly(blob);
@@ -141,9 +151,14 @@ public class BlobReferenceResolver implements AutoCloseable {
       List<Long> addresses = group.distinctAddresses; // requested order
       List<BlobFile> blobs = takeBlobs(group.datasetUri, addresses, group.columnName);
 
-      // Every handle takeBlobs returned is released in the finally below, including on the two
-      // throws: BlobFile wraps a native handle with no cleaner, so an abandoned one is only
+      // Each blob is closed as soon as it has been read, so the success path keeps at most one
+      // reader open: a BlobFile opens its FileScheduler lazily on read() and frees it on close(),
+      // and a group's blobs can live in as many files as it has addresses. ownedThrough records how
+      // far that per-item close has got, so the finally below releases exactly the untouched tail —
+      // on either throw, and without a second close (BlobFile.close is not idempotent). Abandoning
+      // a handle is not an option: it wraps a native pointer with no cleaner, so it would only be
       // reclaimed when the JVM exits, and Spark retries the task in the same JVM.
+      int ownedThrough = -1;
       try {
         // takeBlobs must return exactly one BlobFile per requested address, in order. This guards
         // that contract rather than a case the pinned Lance version can produce: a null-descriptor
@@ -166,14 +181,18 @@ public class BlobReferenceResolver implements AutoCloseable {
                     "takeBlobs returned a null blob for address %d (column=%s, dataset=%s)",
                     addresses.get(i), group.columnName, group.datasetUri));
           }
-          byte[] data = blob.read();
+          byte[] data;
+          ownedThrough = i;
+          try (BlobFile owned = blob) {
+            data = owned.read();
+          }
           for (int vectorIndex : group.indicesByAddress.get(addresses.get(i))) {
             resolved.put(vectorIndex, data);
           }
         }
       } finally {
-        for (BlobFile blob : blobs) {
-          CloseableUtil.closeQuietly(blob);
+        for (int i = ownedThrough + 1; i < blobs.size(); i++) {
+          CloseableUtil.closeQuietly(blobs.get(i));
         }
       }
     }
