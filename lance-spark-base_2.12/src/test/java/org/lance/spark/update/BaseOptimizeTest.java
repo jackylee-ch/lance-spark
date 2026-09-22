@@ -327,9 +327,6 @@ public abstract class BaseOptimizeTest {
   public void testMaterializeDeletionsThresholdAcceptsAnyNumericLiteral() {
     prepareDataset();
 
-    // The grammar boxes 1 as Long, 0.5 as Float and 0.5d as Double, so every spelling has to
-    // reach withMaterializeDeletionsThreshold instead of failing the cast. Only the first call
-    // has fragments left to compact, so assert acceptance rather than the compaction counts.
     for (String threshold : new String[] {"1", "0.5", "0.5d", "0.5f"}) {
       Dataset<Row> result =
           spark.sql(

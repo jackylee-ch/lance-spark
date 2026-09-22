@@ -51,12 +51,6 @@ case class OptimizeExec(
     builder.build()
   }
 
-  /**
-   * The SQL extension grammar boxes a numeric literal as Long, Float or Double depending on how it
-   * was written (`1`, `0.5`, `0.5d`), so an option documented as a float cannot assume one of them.
-   * Options documented as Long stay Long-only on purpose: widening them would let `2.5` through as
-   * a silently truncated `2` instead of being rejected.
-   */
   private def floatArg(arg: LanceNamedArgument): Float = arg.value match {
     case n: java.lang.Number => n.floatValue()
     case other =>
@@ -64,6 +58,7 @@ case class OptimizeExec(
         s"'${arg.name}' option must be a numeric literal, got: $other")
   }
 
+  // Long-only: reject a fractional literal rather than truncating it (longValue would make 2.5 a 2).
   private def longArg(arg: LanceNamedArgument): Long = arg.value match {
     case l: java.lang.Long => l.longValue()
     case other =>
