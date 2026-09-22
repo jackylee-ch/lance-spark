@@ -59,6 +59,14 @@ public class PositionDeltaWriteOptionsTest {
 
   private static SparkPositionDeltaWriteBuilder newBuilder(
       Map<String, String> storedOptions, Map<String, String> writeOptions, String tableFormat) {
+    return newBuilder(storedOptions, writeOptions, tableFormat, Collections.emptyMap());
+  }
+
+  private static SparkPositionDeltaWriteBuilder newBuilder(
+      Map<String, String> storedOptions,
+      Map<String, String> writeOptions,
+      String tableFormat,
+      Map<String, String> tableProperties) {
     LanceSparkReadOptions readOptions =
         LanceSparkReadOptions.builder()
             .datasetUri("/tmp/position-delta-write-options.lance")
@@ -74,7 +82,7 @@ public class PositionDeltaWriteOptionsTest {
             Collections.emptyMap(),
             false,
             tableFormat,
-            Collections.emptyMap());
+            tableProperties);
     return (SparkPositionDeltaWriteBuilder) operation.newWriteBuilder(writeInfo(writeOptions));
   }
 
@@ -111,5 +119,30 @@ public class PositionDeltaWriteOptionsTest {
         newBuilder(Collections.emptyMap(), Collections.emptyMap(), "2.0").getWriteOptions();
 
     Assertions.assertEquals("2.0", options.getFileFormatVersion());
+  }
+
+  @Test
+  public void testTableEnableStableRowIdsAppliesWhenOptionsDoNotSetIt() {
+    Map<String, String> tableProperties =
+        Collections.singletonMap(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
+
+    LanceSparkWriteOptions options =
+        newBuilder(Collections.emptyMap(), Collections.emptyMap(), null, tableProperties)
+            .getWriteOptions();
+
+    Assertions.assertEquals(Boolean.TRUE, options.getEnableStableRowIds());
+  }
+
+  @Test
+  public void testWriteOptionOverridesTableEnableStableRowIds() {
+    Map<String, String> writeOptions =
+        Collections.singletonMap(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "false");
+    Map<String, String> tableProperties =
+        Collections.singletonMap(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
+
+    LanceSparkWriteOptions options =
+        newBuilder(Collections.emptyMap(), writeOptions, null, tableProperties).getWriteOptions();
+
+    Assertions.assertEquals(Boolean.FALSE, options.getEnableStableRowIds());
   }
 }
