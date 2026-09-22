@@ -45,7 +45,7 @@ The `SET UNENFORCED PRIMARY KEY` command returns the following information:
 
 ## How It Works
 
-The command commits a new table version that attaches `lance-schema:unenforced-primary-key` field metadata to each declared column, together with its one-based position in the key. Because the change is a normal commit, earlier versions keep their original schema and remain available for time travel.
+The command commits a new table version that attaches two metadata keys to each declared column: `lance-schema:unenforced-primary-key` holds the marker value `true`, and `lance-schema:unenforced-primary-key:position` holds the column's one-based position in the key. Because the change is a normal commit, earlier versions keep their original schema and remain available for time travel.
 
 ## Notes and Limitations
 
