@@ -23,6 +23,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -179,6 +180,24 @@ public class LanceSparkWriteOptionsTest {
     assertEquals(256, writeOptions.getBatchSize());
     assertTrue(writeOptions.getEnableStableRowIds());
     assertEquals(Long.valueOf(2147483648L), writeOptions.getBlobPackFileSizeThreshold());
+  }
+
+  @Test
+  public void testWriteModeParsedWithFixedLocale() {
+    // "overwrite".toUpperCase() under the Turkish locale yields "OVERWRİTE" (dotted İ), which is
+    // not a WriteMode constant. The option must fold with Locale.ROOT so overwrite parses under any
+    // default locale, not only ASCII ones.
+    final Locale previous = Locale.getDefault();
+    try {
+      Locale.setDefault(new Locale("tr", "TR"));
+      final Map<String, String> options = new HashMap<>();
+      options.put("write_mode", "overwrite");
+      final LanceSparkWriteOptions writeOptions =
+          LanceSparkWriteOptions.builder().datasetUri(TEMP_URL).fromOptions(options).build();
+      assertEquals(WriteParams.WriteMode.OVERWRITE, writeOptions.getWriteMode());
+    } finally {
+      Locale.setDefault(previous);
+    }
   }
 
   @Test
