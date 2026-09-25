@@ -183,10 +183,7 @@ public class LanceSparkWriteOptionsTest {
   }
 
   @Test
-  public void testWriteModeParsedWithFixedLocale() {
-    // "overwrite".toUpperCase() under the Turkish locale yields "OVERWRİTE" (dotted İ), which is
-    // not a WriteMode constant. The option must fold with Locale.ROOT so overwrite parses under any
-    // default locale, not only ASCII ones.
+  public void testOverwriteParsesIndependentOfDefaultLocale() {
     final Locale previous = Locale.getDefault();
     try {
       Locale.setDefault(new Locale("tr", "TR"));
