@@ -82,8 +82,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
 
   @Test
   @Disabled(
-      "SEARCH now routes to queryTable, which ignores structured_query until lance-core dir.rs"
-          + " adds structured support (re-enable after the lance-core bump).")
+      "SEARCH takes queryTable's structuredQuery branch (fullTextQueryJson), which lance-core"
+          + " dir.rs does not yet honor; the stringQuery branch used by HYBRID_SEARCH on the same"
+          + " queryTable path works. Re-enable after the lance-core bump adds structured support.")
   public void testSearchTableFunction() {
     String fullName = createFtsTable();
 
@@ -307,8 +308,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
 
   @Test
   @Disabled(
-      "SEARCH now routes to queryTable, which ignores structured_query until lance-core dir.rs"
-          + " adds structured support (re-enable after the lance-core bump).")
+      "SEARCH takes queryTable's structuredQuery branch (fullTextQueryJson), which lance-core"
+          + " dir.rs does not yet honor; the stringQuery branch used by HYBRID_SEARCH on the same"
+          + " queryTable path works. Re-enable after the lance-core bump adds structured support.")
   public void testSearchNamedArguments() {
     Assumptions.assumeTrue(supportsNamedArguments());
     String ftsTable = createFtsTable();
