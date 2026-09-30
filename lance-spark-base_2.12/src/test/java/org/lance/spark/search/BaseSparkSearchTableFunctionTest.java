@@ -206,10 +206,9 @@ public abstract class BaseSparkSearchTableFunctionTest {
   }
 
   @Test
-  public void testNamedArguments() {
+  public void testVectorSearchNamedArguments() {
     Assumptions.assumeTrue(supportsNamedArguments());
     String vectorTable = createVectorTable();
-    String hybridTable = createHybridTable();
 
     List<Row> vectorRows =
         spark
@@ -277,6 +276,12 @@ public abstract class BaseSparkSearchTableFunctionTest {
     assertEquals(0, vectorRowId.getInt(0));
     assertEquals(0.0f, vectorRowId.getFloat(1), 0.001f);
     assertTrue(vectorRowId.getLong(2) >= 0);
+  }
+
+  @Test
+  public void testHybridSearchNamedArguments() {
+    Assumptions.assumeTrue(supportsNamedArguments());
+    String hybridTable = createHybridTable();
 
     Dataset<Row> hybridWithRowId =
         spark.sql(
