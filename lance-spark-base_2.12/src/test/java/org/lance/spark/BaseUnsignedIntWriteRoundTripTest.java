@@ -47,6 +47,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -219,5 +220,40 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertEquals(40000, rows.get(1).getInt(1));
     assertEquals(3000000000L, rows.get(1).getLong(2));
     assertEquals(5000000000L, rows.get(1).getLong(3));
+  }
+
+  /**
+   * A value Spark's wider signed type can hold but the unsigned width cannot (256 for uint8, or a
+   * negative) must be rejected, not silently narrowed and committed, so an append can never store a
+   * value different from what the user wrote.
+   */
+  @Test
+  public void testOutOfRangeUnsignedValuesAreRejected() throws Exception {
+    String datasetUri = tempDir.resolve("uint_range.lance").toString();
+    createUnsignedDataset(datasetUri);
+    StructType schema = spark.read().format(LanceDataSource.name).load(datasetUri).schema();
+
+    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 256, 0, 0L, 0L));
+    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 0, 65536, 0L, 0L));
+    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 0, 0, 4294967296L, 0L));
+    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) -1, 0, 0L, 0L));
+
+    // None of the rejected appends may have published a row.
+    assertEquals(
+        1L,
+        spark.read().format(LanceDataSource.name).load(datasetUri).count(),
+        "a rejected append must not add rows");
+  }
+
+  private void assertAppendRejected(StructType schema, String datasetUri, Row row) {
+    assertThrows(
+        Exception.class,
+        () ->
+            spark
+                .createDataFrame(Collections.singletonList(row), schema)
+                .write()
+                .format(LanceDataSource.name)
+                .mode(SaveMode.Append)
+                .save(datasetUri));
   }
 }

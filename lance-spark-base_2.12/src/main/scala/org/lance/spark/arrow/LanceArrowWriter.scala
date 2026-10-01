@@ -317,15 +317,21 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
 }
 
 // Writers for the narrower unsigned Arrow ints (uint8/16/32) restored from the width marker.
-// fromArrowField widened uint8->Short, uint16->Int, uint32->Long, so the Spark getter is always
-// wider than the unsigned target: setSafe stores the low bits, which for an in-range value (the
-// round-trip case) is exactly the original unsigned value. This mirrors UnsignedLongWriter, which
-// likewise reinterprets the Long bits into UInt8Vector without a range guard.
+// fromArrowField widened uint8->Short, uint16->Int, uint32->Long, so the Spark getter is wider
+// than the unsigned target and can hold values outside the unsigned range. setSafe would silently
+// discard the high bits and store a different value (e.g. 256 -> 0, -1 -> the width's max), which
+// Lance then accepts as a valid unsigned value, so reject out-of-range input up front. (uint64 needs
+// no guard: UInt8Vector is exactly as wide as Spark's Long, so every value is a valid uint64.)
 private[arrow] class UnsignedByteWriter(val valueVector: UInt1Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getShort(ordinal))
+    val value = input.getShort(ordinal)
+    if (value < 0 || value > 255) {
+      throw new IllegalArgumentException(
+        s"uint8 column '$name' requires values in [0, 255], got $value")
+    }
+    valueVector.setSafe(count, value)
   }
 }
 
@@ -333,7 +339,12 @@ private[arrow] class UnsignedShortWriter(val valueVector: UInt2Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getInt(ordinal))
+    val value = input.getInt(ordinal)
+    if (value < 0 || value > 65535) {
+      throw new IllegalArgumentException(
+        s"uint16 column '$name' requires values in [0, 65535], got $value")
+    }
+    valueVector.setSafe(count, value)
   }
 }
 
@@ -341,7 +352,12 @@ private[arrow] class UnsignedIntWriter(val valueVector: UInt4Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}
   override def setValue(input: SpecializedGetters, ordinal: Int): Unit = {
-    valueVector.setSafe(count, input.getLong(ordinal).toInt)
+    val value = input.getLong(ordinal)
+    if (value < 0 || value > 4294967295L) {
+      throw new IllegalArgumentException(
+        s"uint32 column '$name' requires values in [0, 4294967295], got $value")
+    }
+    valueVector.setSafe(count, value.toInt)
   }
 }
 
