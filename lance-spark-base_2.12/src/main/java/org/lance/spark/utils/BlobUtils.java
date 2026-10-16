@@ -38,8 +38,9 @@ public class BlobUtils {
   public static final String MIN_BLOB_V2_FILE_FORMAT_VERSION = "2.2";
 
   /**
-   * Highest version that still accepts the legacy (v1) blob encoding; Lance rejects {@link
-   * #LANCE_ENCODING_BLOB_KEY} from {@link #MIN_BLOB_V2_FILE_FORMAT_VERSION} on.
+   * Highest version that stores the legacy (v1) blob encoding. From {@link
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} on, Lance turns a column marked {@link
+   * #LANCE_ENCODING_BLOB_KEY} into blob v2.
    */
   public static final String MAX_BLOB_V1_FILE_FORMAT_VERSION = "2.1";
 
@@ -51,11 +52,11 @@ public class BlobUtils {
       new HashSet<>(Arrays.asList("stable", "next"));
 
   /**
-   * Versions Lance recognizes and rejects the legacy (v1) blob encoding on. Lance parses versions
-   * against a closed set, so an unrecognized string such as {@code 2.4} is not a newer format but a
-   * parse failure, and is left for Lance to report rather than rejected here. Only this side needs
-   * listing: it grows with each Lance release, while the v1-capable side is closed at {@link
-   * #MAX_BLOB_V1_FILE_FORMAT_VERSION}.
+   * Versions Lance recognizes that cannot store the legacy (v1) blob encoding. Lance parses
+   * versions against a closed set, so an unrecognized string such as {@code 2.4} is not a newer
+   * format but a parse failure, and is left for Lance to report rather than rejected here. Only
+   * this side needs listing: it grows with each Lance release, while the v1-capable side is closed
+   * at {@link #MAX_BLOB_V1_FILE_FORMAT_VERSION}.
    */
   private static final Set<String> KNOWN_BLOB_V2_VERSIONS =
       new HashSet<>(Arrays.asList("2.2", "2.3", "stable", "next"));
@@ -236,9 +237,10 @@ public class BlobUtils {
   }
 
   /**
-   * True when Lance is known to reject legacy (v1) blob columns at {@code fileFormatVersion}.
-   * Deliberately narrower than {@link #fileFormatSupportsBlobV2(String)}, which picks the metadata
-   * to write and so errs towards v2; this one gates an up-front failure.
+   * True when {@code fileFormatVersion} is known not to store legacy (v1) blob columns, so the
+   * connector refuses to create or write them at it. Deliberately narrower than {@link
+   * #fileFormatSupportsBlobV2(String)}, which picks the metadata to write and so errs towards v2;
+   * this one gates an up-front failure.
    */
   public static boolean knownToRejectBlobV1(String fileFormatVersion) {
     if (fileFormatVersion == null) {

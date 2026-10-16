@@ -788,6 +788,63 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   @Test
+  public void testWriteAtBlobV2VersionToBlobV1TableIsRejected() {
+    String tableName = catalogName + ".default.blob_v1_write_22_" + System.currentTimeMillis();
+    spark.sql(
+        "CREATE TABLE "
+            + tableName
+            + " (id INT NOT NULL, data BINARY) USING lance "
+            + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
+    spark.sql("INSERT INTO " + tableName + " VALUES (1, X'6F6C64')");
+
+    Dataset<Row> more =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(2, "new".getBytes(StandardCharsets.UTF_8))),
+            spark.table(tableName).schema());
+    // Lance 13 would convert the column to blob v2 and then fail to read the new file.
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> more.writeTo(tableName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+
+    StructType schema = spark.table(tableName).schema();
+    assertBlobMetadata(schema, "data");
+    assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
+    assertEquals(1L, spark.table(tableName).count());
+
+    spark.sql("DROP TABLE IF EXISTS " + tableName);
+  }
+
+  @Test
+  public void testStagedCreateWrittenAtBlobV2VersionIsRejected() {
+    String tableName = "blob_v1_staged_22_" + System.currentTimeMillis();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("data", DataTypes.BinaryType, true);
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, "x".getBytes(StandardCharsets.UTF_8))),
+            schema);
+    // Staged at 2.1, so the column is blob v1; the write-time version must not override that.
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                rows.writeTo(catalogName + ".default." + tableName)
+                    .using("lance")
+                    .tableProperty("data.lance.encoding", "blob")
+                    .tableProperty("file_format_version", "2.1")
+                    .option("file_format_version", "stable")
+                    .create());
+    assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, tableName)));
+  }
+
+  @Test
   public void testBlobColumnsUseBlobV2WithoutFileFormatVersion() {
     String tableName = "blob_v2_ffv_unset_" + System.currentTimeMillis();
 
