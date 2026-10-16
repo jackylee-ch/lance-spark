@@ -467,8 +467,9 @@ public class LanceDataset
 
     // Keep blob v1 columns on 2.1 or older, as CREATE TABLE does. Since lance#9459 a commit that
     // adds a 2.2+ file turns them into blob v2, while Lance's fragment writer still stores the v1
-    // layout in that file, so the new version cannot be read. This can go once Lance's
-    // FragmentCreateBuilder converts legacy blob input the way its versioned write does.
+    // layout in that file, so the new version cannot be read. Revisit once Lance's
+    // FragmentCreateBuilder converts legacy blob input and lance#9458 settles how v1 fields move to
+    // v2: lifting the check would then silently turn such columns into blob v2 descriptors.
     String writeVersion = writeOptions.getFileFormatVersion();
     if (BlobUtils.knownToRejectBlobV1(writeVersion) && BlobUtils.hasBlobV1Fields(sparkSchema)) {
       throw new IllegalArgumentException(

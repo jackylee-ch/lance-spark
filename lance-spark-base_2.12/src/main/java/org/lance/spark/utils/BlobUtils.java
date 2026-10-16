@@ -14,14 +14,19 @@
 package org.lance.spark.utils;
 
 import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.types.ArrayType;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.MapType;
 import org.apache.spark.sql.types.Metadata;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -191,17 +196,51 @@ public class BlobUtils {
   }
 
   /**
-   * Names of the legacy (v1) blob columns in {@code schema}, identified by {@link
-   * #LANCE_ENCODING_BLOB_KEY}.
+   * Paths of the legacy (v1) blob fields in {@code schema}, identified by {@link
+   * #LANCE_ENCODING_BLOB_KEY}. Fields nested in structs, arrays and maps count too: Lance converts
+   * them to blob v2 like top-level columns.
    */
   public static Set<String> blobV1ColumnNames(StructType schema) {
-    Set<String> names = new HashSet<>();
-    for (StructField field : schema.fields()) {
-      if (isBlobSparkField(field)) {
-        names.add(field.name());
-      }
+    Set<String> paths = new LinkedHashSet<>();
+    collectBlobV1Paths("", schema, Metadata.empty(), paths);
+    return paths;
+  }
+
+  private static void collectBlobV1Paths(
+      String path, DataType type, Metadata metadata, Set<String> paths) {
+    if (isBlobSparkMetadata(metadata)) {
+      paths.add(path);
     }
-    return names;
+    if (type instanceof StructType) {
+      for (StructField field : ((StructType) type).fields()) {
+        String fieldPath = path.isEmpty() ? field.name() : path + "." + field.name();
+        collectBlobV1Paths(fieldPath, field.dataType(), field.metadata(), paths);
+      }
+    } else if (type instanceof ArrayType) {
+      // Spark has no metadata slot for array elements or map entries, so the connector keeps
+      // theirs on the parent field (see LanceArrowUtils).
+      collectBlobV1Paths(
+          path,
+          ((ArrayType) type).elementType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY()),
+          paths);
+    } else if (type instanceof MapType) {
+      MapType map = (MapType) type;
+      collectBlobV1Paths(
+          path + ".key",
+          map.keyType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_KEY_METADATA_KEY()),
+          paths);
+      collectBlobV1Paths(
+          path + ".value",
+          map.valueType(),
+          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY()),
+          paths);
+    }
+  }
+
+  private static Metadata embeddedMetadata(Metadata parent, String key) {
+    return parent.contains(key) ? Metadata.fromJson(parent.getString(key)) : Metadata.empty();
   }
 
   /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */

@@ -23,6 +23,8 @@ import org.apache.spark.sql.connector.catalog.Identifier;
 import org.apache.spark.sql.connector.catalog.TableCatalog;
 import org.apache.spark.sql.connector.expressions.Transform;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.Metadata;
+import org.apache.spark.sql.types.MetadataBuilder;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterEach;
@@ -842,6 +844,41 @@ public abstract class BaseBlobCreateTableTest {
     TableCatalog catalog =
         (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
     assertFalse(catalog.tableExists(Identifier.of(new String[] {"default"}, tableName)));
+  }
+
+  @Test
+  public void testNestedBlobV1FieldsStayOnBlobV1Versions() throws Exception {
+    String tableName = "blob_v1_nested_" + System.currentTimeMillis();
+    String fullName = catalogName + ".default." + tableName;
+    Metadata blob =
+        new MetadataBuilder()
+            .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
+            .build();
+    StructType schema =
+        new StructType()
+            .add("id", DataTypes.IntegerType, false)
+            .add("payload", new StructType().add("data", DataTypes.BinaryType, true, blob));
+    Dataset<Row> rows =
+        spark.createDataFrame(
+            Collections.singletonList(RowFactory.create(1, RowFactory.create(new byte[] {65}))),
+            schema);
+
+    // Lance promotes nested blob v1 fields too, so they keep an unpinned create at 2.1.
+    rows.writeTo(fullName).using("lance").create();
+    TableCatalog catalog =
+        (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
+    LanceDataset table =
+        (LanceDataset) catalog.loadTable(Identifier.of(new String[] {"default"}, tableName));
+    assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, table.getFileFormatVersion());
+
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> rows.writeTo(fullName).option("file_format_version", "2.2").append());
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    assertEquals(1, spark.table(fullName).collectAsList().size());
+
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
   }
 
   @Test
