@@ -24,7 +24,7 @@ The `VACUUM` command supports several options to control cleanup behavior:
 |--------|------|-------------|
 | `before_version` | Long | Remove versions older than this version number |
 | `before_timestamp_millis` | Long | Remove versions older than this timestamp (milliseconds since epoch) |
-| `delete_unverified` | Boolean | Delete unreferenced files without waiting until they are 7 days old (default: false). This includes the files of writes that have not committed yet, so enable it only when nothing writes to the table, including `OPTIMIZE` and index builds |
+| `delete_unverified` | Boolean | Delete unreferenced files without waiting until they are 7 days old (default: false). This includes the files of writes that have not committed yet, so enable it only when nothing writes to the table, including `OPTIMIZE` and index builds. |
 | `error_if_tagged_old_versions` | Boolean | Error if old versions have tags (default: false) |
 
 ### Examples

@@ -323,7 +323,7 @@ object LanceArrowUtils {
   private def hasContent(metadata: Metadata): Boolean =
     metadata != null && metadata.json != "{}"
 
-  private def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
+  def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
     if (parent == null || !parent.contains(key)) {
       Metadata.empty
     } else {

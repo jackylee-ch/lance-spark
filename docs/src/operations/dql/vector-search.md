@@ -55,7 +55,7 @@ Use positional arguments for simple calls and Spark 3.4 compatibility.
 | `filter` | String | No | SQL filter expression evaluated by Lance. |
 | `offset` | Integer | No | Number of results to skip. Lance Spark requests `num_results + offset` rows from Lance before applying the offset. |
 | `version` | Long | No | Lance table version to search. |
-| `nprobes`, `ef` | Integer | No | Vector index search tuning parameters. `nprobes` is the exact number of IVF partitions to probe; raise it to recover recall lost to an approximate search. Without `nprobes`, Lance chooses how many to probe and, with `prefilter => true`, keeps probing until it finds `num_results` rows. |
+| `nprobes`, `ef` | Integer | No | Vector index search tuning parameters. Distributed execution and the directory namespace probe exactly `nprobes` IVF partitions (see [Execution](#execution)); raise it to recover recall lost to an approximate search. Without `nprobes`, Lance chooses how many to probe and, with `prefilter => true`, keeps probing until it finds `num_results` rows. |
 | `refine_factor` | Integer | No | Over-fetch `num_results * refine_factor` candidates from the index, then re-score them against the original vectors and keep the best `num_results`. Improves accuracy for quantized indexes such as IVF_PQ, at the cost of reading the vectors back. |
 | `lower_bound`, `upper_bound` | Float | No | Distance bounds. |
 | `bypass_vector_index`, `fast_search`, `prefilter`, `with_row_id` | Boolean | No | Lance query options. `with_row_id` adds `_rowid` to the output. `bypass_vector_index` and `fast_search` cannot both be true. |

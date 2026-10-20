@@ -29,6 +29,7 @@ import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BlobUtilsTest {
@@ -81,10 +82,13 @@ public class BlobUtilsTest {
             .putString(BlobUtils.LANCE_ENCODING_BLOB_KEY, BlobUtils.LANCE_ENCODING_BLOB_VALUE)
             .build();
     StructType inner = new StructType().add("data", DataTypes.BinaryType, true, v1);
-    // An array element's metadata sits on the array field, as the connector reads it back.
     Metadata blobElements =
         new MetadataBuilder()
             .putString(LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY(), v1.json())
+            .build();
+    Metadata blobValues =
+        new MetadataBuilder()
+            .putString(LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY(), v1.json())
             .build();
     StructType schema =
         new StructType()
@@ -92,9 +96,16 @@ public class BlobUtilsTest {
             .add("payload", inner)
             .add("items", DataTypes.createArrayType(inner))
             .add("byName", DataTypes.createMapType(DataTypes.StringType, inner))
-            .add("chunks", DataTypes.createArrayType(DataTypes.BinaryType), true, blobElements);
+            .add("chunks", DataTypes.createArrayType(DataTypes.BinaryType), true, blobElements)
+            .add(
+                "blobByName",
+                DataTypes.createMapType(DataTypes.StringType, DataTypes.BinaryType),
+                true,
+                blobValues);
     assertEquals(
-        new HashSet<>(Arrays.asList("payload.data", "items.data", "byName.value.data", "chunks")),
+        new HashSet<>(
+            Arrays.asList(
+                "payload.data", "items.data", "byName.value.data", "chunks", "blobByName.value")),
         BlobUtils.blobV1ColumnNames(schema));
     assertFalse(
         BlobUtils.hasBlobV1Fields(
@@ -208,6 +219,20 @@ public class BlobUtilsTest {
     // Lance parses versions against a closed set, so these do not name a newer format at all.
     assertFalse(BlobUtils.knownToRejectBlobV1("2.4"));
     assertFalse(BlobUtils.knownToRejectBlobV1("3.0"));
+  }
+
+  @Test
+  public void checkBlobV1WriteVersionRejectsOnlyVersionsThatCannotStoreV1() {
+    StructType nestedV1 =
+        new StructType().add("payload", new StructType(new StructField[] {blobV1Field("data")}));
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> BlobUtils.checkBlobV1WriteVersion(nestedV1, "stable"));
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    BlobUtils.checkBlobV1WriteVersion(nestedV1, "2.1");
+    BlobUtils.checkBlobV1WriteVersion(nestedV1, null);
+    BlobUtils.checkBlobV1WriteVersion(new StructType(new StructField[] {blobV2Field()}), "2.2");
   }
 
   private static StructField blobV1Field(String name) {

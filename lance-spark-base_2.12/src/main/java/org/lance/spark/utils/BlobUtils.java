@@ -222,25 +222,24 @@ public class BlobUtils {
       collectBlobV1Paths(
           path,
           ((ArrayType) type).elementType(),
-          embeddedMetadata(metadata, LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY()),
+          LanceArrowUtils.parseEmbeddedMetadata(
+              metadata, LanceArrowUtils.LANCE_ELEMENT_METADATA_KEY()),
           paths);
     } else if (type instanceof MapType) {
       MapType map = (MapType) type;
       collectBlobV1Paths(
           path + ".key",
           map.keyType(),
-          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_KEY_METADATA_KEY()),
+          LanceArrowUtils.parseEmbeddedMetadata(
+              metadata, LanceArrowUtils.LANCE_MAP_KEY_METADATA_KEY()),
           paths);
       collectBlobV1Paths(
           path + ".value",
           map.valueType(),
-          embeddedMetadata(metadata, LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY()),
+          LanceArrowUtils.parseEmbeddedMetadata(
+              metadata, LanceArrowUtils.LANCE_MAP_VALUE_METADATA_KEY()),
           paths);
     }
-  }
-
-  private static Metadata embeddedMetadata(Metadata parent, String key) {
-    return parent.contains(key) ? Metadata.fromJson(parent.getString(key)) : Metadata.empty();
   }
 
   /** Returns true if any field in {@code schema} carries legacy (v1) blob metadata. */
@@ -286,6 +285,32 @@ public class BlobUtils {
       return false;
     }
     return KNOWN_BLOB_V2_VERSIONS.contains(fileFormatVersion.trim().toLowerCase(Locale.ROOT));
+  }
+
+  /**
+   * Rejects writing {@code schema}'s legacy (v1) blob fields at a {@code fileFormatVersion} that
+   * cannot store them. A commit that adds a 2.2+ file turns those fields into blob v2, while {@code
+   * Fragment.create} still writes the v1 layout into the file, so the new version cannot be read.
+   */
+  public static void checkBlobV1WriteVersion(StructType schema, String fileFormatVersion) {
+    if (!knownToRejectBlobV1(fileFormatVersion)) {
+      return;
+    }
+    Set<String> blobV1Fields = blobV1ColumnNames(schema);
+    if (!blobV1Fields.isEmpty()) {
+      throw new IllegalArgumentException(
+          "Legacy (v1) blob columns "
+              + blobV1Fields
+              + " cannot be written with file_format_version '"
+              + fileFormatVersion
+              + "'. Write with "
+              + MAX_BLOB_V1_FILE_FORMAT_VERSION
+              + " or older, or rebuild the columns as blob v2. If the table was already written at "
+              + MIN_BLOB_V2_FILE_FORMAT_VERSION
+              + " or newer, first overwrite it with its own rows at "
+              + MAX_BLOB_V1_FILE_FORMAT_VERSION
+              + "; any other commit leaves it unreadable.");
+    }
   }
 
   /**

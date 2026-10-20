@@ -237,7 +237,8 @@ public abstract class BaseVacuumTest {
             .collectAsList()
             .get(0);
     Assertions.assertEquals(0L, (long) retry.getAs("failed_deletes"));
-    Assertions.assertTrue(retry.getLong(0) > 0, "a later vacuum removes the leftover files");
+    Assertions.assertTrue(
+        (long) retry.getAs("data_files_removed") > 0, "a later vacuum removes the leftover files");
   }
 
   private Path datasetPath() throws Exception {

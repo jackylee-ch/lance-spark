@@ -690,9 +690,8 @@ that schema already carries `lance-encoding:blob = true`, which only `2.1` and o
 as v1, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
 of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
 A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
-format version can store both. The same holds for writes: writing a table that has v1 blob
-fields, top-level or nested, at `2.2` or newer, `stable` or `next`, whether set by the
-`file_format_version` write option or by the table's own version, is rejected.
+format version can store both. The same holds for writes: a `file_format_version` of `2.2` or
+newer, `stable` or `next` is rejected for a table with v1 blob fields, top-level or nested.
 
 Earlier connector releases, on Lance 12, accepted such writes and kept the columns v1, but
 stored the new data files at the requested version. With Lance 13, any commit to a table that

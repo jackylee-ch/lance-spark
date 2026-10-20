@@ -791,31 +791,30 @@ public abstract class BaseBlobCreateTableTest {
 
   @Test
   public void testWriteAtBlobV2VersionToBlobV1TableIsRejected() {
-    String tableName = catalogName + ".default.blob_v1_write_22_" + System.currentTimeMillis();
+    String fullName = catalogName + ".default.blob_v1_write_22_" + System.currentTimeMillis();
     spark.sql(
         "CREATE TABLE "
-            + tableName
+            + fullName
             + " (id INT NOT NULL, data BINARY) USING lance "
             + "TBLPROPERTIES ('data.lance.encoding' = 'blob', 'file_format_version' = '2.1')");
-    spark.sql("INSERT INTO " + tableName + " VALUES (1, X'6F6C64')");
+    spark.sql("INSERT INTO " + fullName + " VALUES (1, X'6F6C64')");
 
     Dataset<Row> more =
         spark.createDataFrame(
             Collections.singletonList(RowFactory.create(2, "new".getBytes(StandardCharsets.UTF_8))),
-            spark.table(tableName).schema());
-    // Lance 13 would convert the column to blob v2 and then fail to read the new file.
+            spark.table(fullName).schema());
     IllegalArgumentException e =
         assertThrows(
             IllegalArgumentException.class,
-            () -> more.writeTo(tableName).option("file_format_version", "2.2").append());
+            () -> more.writeTo(fullName).option("file_format_version", "2.2").append());
     assertTrue(e.getMessage().contains("[data]"), e.getMessage());
 
-    StructType schema = spark.table(tableName).schema();
+    StructType schema = spark.table(fullName).schema();
     assertBlobMetadata(schema, "data");
     assertEquals(DataTypes.BinaryType, schema.apply("data").dataType());
-    assertEquals(1L, spark.table(tableName).count());
+    assertEquals(1, spark.table(fullName).collectAsList().size());
 
-    spark.sql("DROP TABLE IF EXISTS " + tableName);
+    spark.sql("DROP TABLE IF EXISTS " + fullName);
   }
 
   @Test
@@ -863,7 +862,6 @@ public abstract class BaseBlobCreateTableTest {
             Collections.singletonList(RowFactory.create(1, RowFactory.create(new byte[] {65}))),
             schema);
 
-    // Lance promotes nested blob v1 fields too, so they keep an unpinned create at 2.1.
     rows.writeTo(fullName).using("lance").create();
     TableCatalog catalog =
         (TableCatalog) spark.sessionState().catalogManager().catalog(catalogName);
