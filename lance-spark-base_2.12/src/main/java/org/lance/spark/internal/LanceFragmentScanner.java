@@ -90,6 +90,10 @@ public class LanceFragmentScanner implements AutoCloseable {
       boolean hasBlobColumns = !blobColumnNames.isEmpty();
 
       List<String> projectedColumns = getColumnNames(scanSchema);
+      if (readOptions.getFullTextQuery() != null
+          && Arrays.stream(scanSchema.fields()).anyMatch(Utils::isScoreMetadataColumn)) {
+        projectedColumns.add(LanceConstant.SCORE);
+      }
       if (projectedColumns.isEmpty() && scanSchema.isEmpty()) {
         scanOptions.withRowId(true);
       }
@@ -110,6 +114,8 @@ public class LanceFragmentScanner implements AutoCloseable {
       scanOptions.batchSize(readOptions.getBatchSize());
       if (readOptions.getFullTextQuery() != null) {
         scanOptions.fullTextQuery(readOptions.getFullTextQuery());
+        scanOptions.prefilter(true);
+        scanOptions.disableScoringAutoprojection(true);
       }
       scanOptions.useScalarIndex(readOptions.isUseScalarIndex());
       if (inputPartition.getLimit().isPresent()) {
@@ -176,9 +182,8 @@ public class LanceFragmentScanner implements AutoCloseable {
   }
 
   /**
-   * @return the Arrow schema the native scan produces, including any columns Lance auto-projects
-   *     that are not in the requested projection (e.g. {@code _rowid}, {@code _rowaddr}, or the
-   *     {@code _score} of a full-text query)
+   * @return the Arrow schema the native scan produces, including row IDs or addresses requested
+   *     internally for empty projections and blob references
    */
   public Schema schema() {
     return scanner.schema();
@@ -263,6 +268,7 @@ public class LanceFragmentScanner implements AutoCloseable {
 
     List<String> columns =
         Arrays.stream(schema.fields())
+            .filter(field -> !Utils.isScoreMetadataColumn(field))
             .map(StructField::name)
             .filter(
                 name ->
@@ -271,7 +277,6 @@ public class LanceFragmentScanner implements AutoCloseable {
                         && !name.equals(LanceConstant.ROW_ADDRESS)
                         && !name.equals(LanceConstant.ROW_CREATED_AT_VERSION)
                         && !name.equals(LanceConstant.ROW_LAST_UPDATED_AT_VERSION)
-                        && !name.equals(LanceConstant.SCORE)
                         && !name.endsWith(LanceConstant.BLOB_POSITION_SUFFIX)
                         && !name.endsWith(LanceConstant.BLOB_SIZE_SUFFIX))
             .collect(Collectors.toList());

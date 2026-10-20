@@ -62,8 +62,13 @@ case class VacuumExec(
       }
     }
 
-    Seq(
-      new GenericInternalRow(
-        Array[Any](stats.getBytesRemoved, stats.getOldVersions, stats.getFailedDeletes)))
+    Seq(new GenericInternalRow(Array[Any](
+      stats.getBytesRemoved,
+      stats.getOldVersions,
+      stats.getDataFilesRemoved,
+      stats.getTransactionFilesRemoved,
+      stats.getIndexFilesRemoved,
+      stats.getDeletionFilesRemoved,
+      stats.getFailedDeletes)))
   }
 }
