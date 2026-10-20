@@ -16,6 +16,7 @@ package org.lance.spark.internal;
 import org.lance.ipc.ScanStats;
 import org.lance.spark.LanceConstant;
 import org.lance.spark.read.LanceInputPartition;
+import org.lance.spark.utils.Utils;
 import org.lance.spark.vectorized.BlobStructAccessor;
 import org.lance.spark.vectorized.LanceArrowColumnVector;
 
@@ -61,20 +62,19 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
 
   public boolean loadNextBatch() throws IOException {
     long start = System.nanoTime();
-    boolean hasNext = arrowReader.loadNextBatch();
-    lastBatchLoadTimeNs = System.nanoTime() - start;
-
-    if (hasNext) {
+    try {
+      if (!arrowReader.loadNextBatch()) {
+        return false;
+      }
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
-
       List<ColumnVector> fieldVectors =
           buildSparkOrderedVectors(root, fragmentScanner.getInputPartition());
-
       currentColumnarBatch =
           new ColumnarBatch(fieldVectors.toArray(new ColumnVector[] {}), root.getRowCount());
       return true;
+    } finally {
+      lastBatchLoadTimeNs = System.nanoTime() - start;
     }
-    return false;
   }
 
   /**
@@ -124,7 +124,6 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
     for (int i = 0; i < rootVectors.size(); i++) {
       actualFields.put(rootVectors.get(i).getField().getName(), rootVectors.get(i));
     }
-
     // Extract row addresses for blob reference support
     Set<String> blobColumnNames = fragmentScanner.getBlobColumnNames();
     long[] rowAddresses = extractRowAddresses(rootVectors, blobColumnNames, root.getRowCount());
@@ -156,6 +155,15 @@ public class LanceFragmentColumnarBatchScanner implements AutoCloseable {
           BlobSizeColumnVector sizeVector = new BlobSizeColumnVector((StructVector) blobVector);
           fieldVectors.add(sizeVector);
         }
+      } else if (Utils.isScoreMetadataColumn(field)) {
+        FieldVector vector = actualFields.get(fieldName);
+        if (vector == null) {
+          throw new IllegalStateException(
+              "Lance scan did not return '_score'. This indicates a full-text query was expected "
+                  + "but not applied to the native scanner. Verify that the FTS predicate rule "
+                  + "injected the query into the relation options.");
+        }
+        fieldVectors.add(new LanceArrowColumnVector(vector, false, field));
       } else {
         FieldVector vector = actualFields.get(fieldName);
         if (vector == null) {
