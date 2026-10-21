@@ -56,6 +56,7 @@ The following features require the Lance Spark SQL extension to be enabled:
 - [ADD COLUMNS with backfill](operations/dml/add-columns.md) - Add new columns and backfill existing rows with data
 - [UPDATE COLUMNS with backfill](operations/dml/update-columns.md) - Update existing columns using data from a source
 - [OPTIMIZE](operations/ddl/optimize.md) - Compact table fragments for improved query performance
+- [OPTIMIZE INDEX](operations/ddl/optimize-index.md) - Incrementally maintain a named index
 - [VACUUM](operations/ddl/vacuum.md) - Remove old versions and reclaim storage space
 
 ## Basic Setup
@@ -73,6 +74,30 @@ and namespace-specific options:
 | `spark.sql.catalog.{name}.single_level_ns`  | Boolean | ✗       | Enable single-level mode with virtual "default" namespace. Default: `false`. See [Note on Namespace Levels](#note-on-namespace-levels). |
 | `spark.sql.catalog.{name}.parent`           | String | ✗        | Parent prefix for multi-level namespaces. See [Note on Namespace Levels](#note-on-namespace-levels).                             |
 | `spark.sql.catalog.{name}.parent_delimiter` | String | ✗        | Delimiter for parent prefix (default: `.`). See [Note on Namespace Levels](#note-on-namespace-levels).                           |
+
+## Distributed Vector Search
+
+Set `spark.sql.lance.search.distributed.enabled=true` to execute `VECTOR_SEARCH` with Spark tasks
+instead of through the namespace server's `queryTable` endpoint. The default is `false`.
+
+Distributed search opens the Lance dataset from executors, so each executor must have network
+access to the backing object store. Storage credentials may come from the configured namespace;
+the `executor_credential_refresh` catalog option controls whether executors reconstruct the
+namespace client and refresh credentials when opening the dataset.
+
+The planner creates one task for every selected vector-index segment and one flat-search task for
+each unindexed fragment. `bypass_vector_index=true` uses only flat-search tasks, while
+`fast_search=true` searches only indexed fragments.
+
+A fragment-restricted scan can only prefilter, so a distributed plan cannot reproduce namespace
+execution's default `prefilter=false`, which applies the filter *after* the top k is chosen and
+therefore usually returns fewer rows. A filtered distributed search must say `prefilter=true`
+explicitly; omitting `prefilter` or setting it to `false` fails during planning rather than
+silently changing what the filter means.
+
+`lower_bound` and `upper_bound` are not supported either, because lance-core's Java scanner cannot
+apply them yet. Disable `spark.sql.lance.search.distributed.enabled` to run any of these through
+the namespace.
 
 ## Cache Backends
 
@@ -398,7 +423,7 @@ Using the Glue namespace requires additional dependencies beyond the main Lance 
 Example with Spark Shell:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.3.0,software.amazon.awssdk:bundle:2.20.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-glue:0.4.2,software.amazon.awssdk:bundle:2.20.0 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=glue \
   --conf spark.sql.catalog.lance.root=s3://your-bucket/lance
@@ -508,7 +533,7 @@ Using Hive namespaces requires additional JARs beyond the main Lance Spark bundl
 Example with Spark Shell for Hive 3.x:
 ```shell
 spark-shell \
-  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-hive3:0.3.0 \
+  --packages org.lance:lance-spark-bundle-3.5_2.12:0.4.0,org.lance:lance-namespace-hive3:0.4.2 \
   --conf spark.sql.catalog.lance=org.lance.spark.LanceNamespaceSparkCatalog \
   --conf spark.sql.catalog.lance.impl=hive3 \
   --conf spark.sql.catalog.lance.hadoop.hive.metastore.uris=thrift://metastore:9083 \
@@ -652,12 +677,24 @@ TBLPROPERTIES (
 ```
 
 With `file_format_version = '2.2'` or higher, blob columns are written using blob v2
-encoding and `ARROW:extension:name = lance.blob.v2 metadata`.
+encoding and `ARROW:extension:name = lance.blob.v2 metadata`. The `stable` and `next`
+release selectors resolve to `2.2` or newer, so they select blob v2 as well.
 
-With an older version, or when `file_format_version` is not set, blob columns use the
-legacy v1 encoding with `lance-encoding:blob = true` metadata.
+When neither the table nor the catalog sets `file_format_version`, the table follows
+Lance's default version, which is `2.2`, so its blob columns are blob v2. A catalog-level
+`file_format_version` is applied first, so a catalog pinned to `2.0`, `2.1` or `legacy`
+still produces v1 blob columns.
 
-Blob encoding requires a numeric `file_format_version`, such as `2.2`.
+Creating a table from a schema read back from an existing v1 blob table is the exception:
+that schema already carries `lance-encoding:blob = true`, which Lance rejects from `2.2`
+on, so the new table is created at `2.1` and its blob columns stay v1. Pinning a version
+of `2.2` or newer for such a schema is rejected — rebuild the column as blob v2 instead.
+A schema that mixes v1 and v2 blob columns is rejected as well, because no single file
+format version can store both.
+
+With an older version, such as `2.0`, `2.1` or `legacy`, blob columns use the legacy v1
+encoding with `lance-encoding:blob = true` metadata. Pin one of those versions to keep a
+blob column on v1 and read it back as `BINARY` instead of a descriptor struct.
 
 Blob v2 writes must go through the catalog path. Use SQL DDL with `TBLPROPERTIES`, as
 shown above, or use the `DataFrameWriterV2` API:

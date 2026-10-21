@@ -22,7 +22,10 @@ import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsLexer;
 import org.apache.spark.sql.catalyst.parser.extensions.LanceSqlExtensionsParser;
 import org.apache.spark.sql.catalyst.plans.logical.AddColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.AddIndex;
+import org.apache.spark.sql.catalyst.plans.logical.LanceNamedArgument;
+import org.apache.spark.sql.catalyst.plans.logical.LanceOptimizeIndex;
 import org.apache.spark.sql.catalyst.plans.logical.Optimize;
+import org.apache.spark.sql.catalyst.plans.logical.RefreshIndex;
 import org.apache.spark.sql.catalyst.plans.logical.ShowIndexes;
 import org.apache.spark.sql.catalyst.plans.logical.UpdateColumnsBackfill;
 import org.apache.spark.sql.catalyst.plans.logical.Vacuum;
@@ -163,6 +166,31 @@ public class LanceSqlExtensionsAstBuilderTest {
   }
 
   @Test
+  public void testRefreshIndexWithBacktickedIdentifiers() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` REFRESH INDEX `my-idx` WITH (NUM_SEGMENTS = 4)");
+    RefreshIndex plan = (RefreshIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("my-idx", plan.indexName());
+    assertEquals(1, plan.args().size());
+    assertEquals("num_segments", plan.args().apply(0).name());
+    assertEquals(4L, plan.args().apply(0).value());
+  }
+
+  @Test
+  public void testRefreshIndexWithoutOptions() {
+    LanceSqlExtensionsParser parser = createParser("ALTER TABLE DB.T REFRESH INDEX IDX");
+    RefreshIndex plan = (RefreshIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    assertEquals("IDX", plan.indexName());
+    assertEquals(0, plan.args().size());
+  }
+
+  @Test
   public void testOptimizeWithBacktickedTableName() {
     LanceSqlExtensionsParser parser = createParser("OPTIMIZE `my-catalog`.`my-table`");
     Optimize plan = (Optimize) astBuilder.visitSingleStatement(parser.singleStatement());
@@ -180,6 +208,26 @@ public class LanceSqlExtensionsAstBuilderTest {
 
     assertEquals(1, plan.args().size());
     assertEquals("target_rows_per_fragment", plan.args().apply(0).name());
+  }
+
+  @Test
+  public void testOptimizeIndexWithOptions() {
+    LanceSqlExtensionsParser parser =
+        createParser(
+            "ALTER TABLE `my-catalog`.`my-table` OPTIMIZE INDEX `my-idx` "
+                + "WITH (NUM_INDICES_TO_MERGE = 2)");
+    LanceOptimizeIndex plan =
+        (LanceOptimizeIndex) astBuilder.visitSingleStatement(parser.singleStatement());
+
+    UnresolvedIdentifier table = (UnresolvedIdentifier) plan.table();
+    assertEquals(
+        List.of("my-catalog", "my-table"), JavaConverters.seqAsJavaList(table.nameParts()));
+    assertEquals("my-idx", plan.indexName());
+
+    List<LanceNamedArgument> args = JavaConverters.seqAsJavaList(plan.args());
+    assertEquals(1, args.size());
+    assertEquals("num_indices_to_merge", args.get(0).name());
+    assertEquals(2L, args.get(0).value());
   }
 
   @Test
