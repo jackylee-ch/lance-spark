@@ -14,12 +14,16 @@
 package org.lance.spark.read;
 
 import org.lance.ipc.FullTextQuery;
+import org.lance.spark.LanceConstant;
 import org.lance.spark.LanceRef;
 import org.lance.spark.LanceSparkReadOptions;
 import org.lance.spark.TestUtils;
+import org.lance.spark.search.LanceSearchInputPartition;
+import org.lance.spark.search.LanceSearchScan;
 import org.lance.spark.utils.BlobUtils;
 import org.lance.spark.utils.Optional;
 
+import org.apache.spark.sql.catalyst.expressions.MetadataAttribute;
 import org.apache.spark.sql.connector.expressions.Expression;
 import org.apache.spark.sql.connector.expressions.FieldReference;
 import org.apache.spark.sql.connector.expressions.NullOrdering;
@@ -111,6 +115,57 @@ public class LanceScanBuilderTest {
     Predicate[] result = builder.pushPredicates(new Predicate[0]);
     assertEquals(0, result.length);
     assertEquals(0, builder.pushedPredicates().length);
+  }
+
+  @Test
+  public void testScoreFilterWithoutFtsStaysResidual() {
+    StructType schema =
+        new StructType()
+            .add(
+                LanceConstant.SCORE,
+                DataTypes.FloatType,
+                true,
+                MetadataAttribute.apply(LanceConstant.SCORE, DataTypes.FloatType, true).metadata());
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            schema,
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    Predicate[] predicates = {TestPredicates.gt(LanceConstant.SCORE, 0.0f)};
+    assertArrayEquals(predicates, builder.pushPredicates(predicates));
+    assertEquals(0, builder.pushedPredicates().length);
+    assertFalse(builder.pushLimit(1));
+    assertFalse(builder.pushOffset(1));
+    assertFalse(
+        builder.pushTopN(
+            new SortOrder[] {
+              new TestSortOrder(
+                  LanceConstant.SCORE, SortDirection.DESCENDING, NullOrdering.NULLS_LAST)
+            },
+            1));
+    assertFalse(
+        builder.pushAggregation(
+            new Aggregation(new AggregateFunc[] {new CountStar()}, new Expression[0])));
+    assertTrue(
+        assertThrows(IllegalArgumentException.class, builder::build)
+            .getMessage()
+            .contains("full-text search predicate"));
+  }
+
+  @Test
+  public void testStoredScoreFilterWithoutFtsIsPushed() {
+    LanceScanBuilder builder =
+        new LanceScanBuilder(
+            new StructType().add(LanceConstant.SCORE, DataTypes.FloatType),
+            TestUtils.TestTable1Config.readOptions,
+            Collections.emptyMap(),
+            null,
+            Collections.emptyMap());
+    Predicate[] predicates = {TestPredicates.gt(LanceConstant.SCORE, 0.0f)};
+    assertEquals(0, builder.pushPredicates(predicates).length);
+    assertArrayEquals(predicates, builder.pushedPredicates());
   }
 
   @Test
@@ -227,6 +282,80 @@ public class LanceScanBuilderTest {
     LanceScanBuilder builder = createBuilder();
     SortOrder order = new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
     assertTrue(builder.pushTopN(new SortOrder[] {order}, 10));
+  }
+
+  @Test
+  public void testPushTopNForScoreOnlySupportsNamespaceDescendingOrder() {
+    int k = 10;
+    SortOrder scoreDescending =
+        new TestSortOrder(LanceConstant.SCORE, SortDirection.DESCENDING, NullOrdering.NULLS_LAST);
+    LanceScanBuilder namespaceBuilder = createFtsScoreBuilder("dir");
+    assertTrue(namespaceBuilder.pushTopN(new SortOrder[] {scoreDescending}, k));
+    assertEquals(k, getNamespaceFtsTopK(namespaceBuilder));
+
+    SortOrder scoreAscending =
+        new TestSortOrder(LanceConstant.SCORE, SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+    LanceScanBuilder ascendingBuilder = createFtsScoreBuilder("dir");
+    assertFalse(ascendingBuilder.pushTopN(new SortOrder[] {scoreAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(ascendingBuilder));
+
+    SortOrder otherColumnAscending =
+        new TestSortOrder("x", SortDirection.ASCENDING, NullOrdering.NULLS_FIRST);
+    LanceScanBuilder otherColumnBuilder = createFtsScoreBuilder("dir");
+    assertFalse(otherColumnBuilder.pushTopN(new SortOrder[] {otherColumnAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(otherColumnBuilder));
+    LanceScanBuilder multiColumnBuilder = createFtsScoreBuilder("dir");
+    assertFalse(
+        multiColumnBuilder.pushTopN(new SortOrder[] {scoreDescending, otherColumnAscending}, k));
+    assertEquals(Integer.MAX_VALUE, getNamespaceFtsTopK(multiColumnBuilder));
+
+    LanceScanBuilder localBuilder = createFtsScoreBuilder(null);
+    assertFalse(localBuilder.pushTopN(new SortOrder[] {scoreDescending}, k));
+  }
+
+  private LanceScanBuilder createFtsScoreBuilder(String namespaceImpl) {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .tableId(Collections.singletonList("default"))
+            .fullTextQuery(FullTextQuery.match("hello", "body"))
+            .build();
+    StructType scoreSchema =
+        new StructType()
+            .add(
+                LanceConstant.SCORE,
+                DataTypes.FloatType,
+                true,
+                MetadataAttribute.apply(LanceConstant.SCORE, DataTypes.FloatType, true).metadata());
+    return new LanceScanBuilder(
+        scoreSchema, options, Collections.emptyMap(), namespaceImpl, Collections.emptyMap());
+  }
+
+  private int getNamespaceFtsTopK(LanceScanBuilder builder) {
+    LanceSearchScan scan = (LanceSearchScan) builder.build();
+    LanceSearchInputPartition partition = (LanceSearchInputPartition) scan.planInputPartitions()[0];
+    return partition.getQuery().toQueryTableRequest().getK();
+  }
+
+  @Test
+  public void testFtsRejectsStoredScore() {
+    LanceSparkReadOptions options =
+        LanceSparkReadOptions.builder()
+            .datasetUri(TestUtils.TestTable1Config.datasetUri)
+            .fullTextQuery(FullTextQuery.match("hello", "body"))
+            .build();
+    UnsupportedOperationException failure =
+        assertThrows(
+            UnsupportedOperationException.class,
+            () ->
+                new LanceScanBuilder(
+                    new StructType().add(LanceConstant.SCORE, DataTypes.FloatType),
+                    options,
+                    Collections.emptyMap(),
+                    "dir",
+                    Collections.emptyMap()));
+    assertTrue(failure.getMessage().contains("stored '_score' column"));
+    assertTrue(failure.getMessage().contains("Rename the stored column"));
   }
 
   @Test
