@@ -49,16 +49,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * Round-trips Lance unsigned integer columns (uint8/16/32/64) through a Spark read then write.
- *
- * <p>Spark has no unsigned integer types, so {@code LanceArrowUtils.fromArrowField} widens each to
- * the smallest signed type that holds it and records the original width in field metadata. On write
- * {@code toArrowField} restores the unsigned Arrow type, and {@code LanceArrowWriter} needs a
- * matching unsigned field writer or the batch fails at writer initialization. A producer must go
- * through the Arrow C Data interface to create such a dataset, exactly as {@code
- * BaseFixedSizeBinaryReadTest} does for a type Spark cannot express either.
+ * Spark cannot create unsigned columns, so the source datasets are written through the Arrow C Data
+ * interface.
  */
 public abstract class BaseUnsignedIntWriteRoundTripTest {
 
@@ -107,8 +102,7 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
       UInt4Vector u32 = (UInt4Vector) root.getVector("u32");
       UInt8Vector u64 = (UInt8Vector) root.getVector("u64");
 
-      // Row 0 holds the maximum value of each width, which reads as a negative number if the width
-      // is ever mistaken for signed, so a correct round trip proves the unsigned type survived.
+      // uint8/16/32 hold their maximum, which reads back negative if taken as signed.
       id.setSafe(0, 1);
       u8.setSafe(0, 255);
       u16.setSafe(0, 65535);
@@ -138,11 +132,6 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertFalse(type.getIsSigned(), name + " should be unsigned");
   }
 
-  /**
-   * A read -&gt; write cycle must reproduce every unsigned width in the written Lance schema.
-   * Without the unsigned field writers this throws {@code UnsupportedOperationException} at batch
-   * writer initialization for uint8/16/32 (uint64 already had a writer).
-   */
   @Test
   public void testUnsignedWidthsRoundTripThroughSparkWrite() throws Exception {
     String sourceUri = tempDir.resolve("uint_roundtrip_source.lance").toString();
@@ -165,8 +154,6 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
       assertUnsigned(written, "u16", 16);
       assertUnsigned(written, "u32", 32);
       assertUnsigned(written, "u64", 64);
-      // The genuinely signed control must stay signed: a copied marker cannot mint an unsigned
-      // type.
       ArrowType.Int id = (ArrowType.Int) written.findField("id").getType();
       assertEquals(32, id.getBitWidth());
       assertTrue(id.getIsSigned());
@@ -186,11 +173,6 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertEquals(9000000000L, rows.get(0).getLong(3));
   }
 
-  /**
-   * Appending through Spark to an existing unsigned Lance table must succeed: the writer restores
-   * the unsigned Arrow type so the batch passes Lance's schema validation against the existing
-   * unsigned columns instead of presenting a signed type.
-   */
   @Test
   public void testAppendToExistingUnsignedTable() throws Exception {
     String datasetUri = tempDir.resolve("uint_append.lance").toString();
@@ -222,38 +204,50 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertEquals(5000000000L, rows.get(1).getLong(3));
   }
 
-  /**
-   * A value Spark's wider signed type can hold but the unsigned width cannot (256 for uint8, or a
-   * negative) must be rejected, not silently narrowed and committed, so an append can never store a
-   * value different from what the user wrote.
-   */
   @Test
   public void testOutOfRangeUnsignedValuesAreRejected() throws Exception {
     String datasetUri = tempDir.resolve("uint_range.lance").toString();
     createUnsignedDataset(datasetUri);
     StructType schema = spark.read().format(LanceDataSource.name).load(datasetUri).schema();
 
-    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 256, 0, 0L, 0L));
-    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 0, 65536, 0L, 0L));
-    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) 0, 0, 4294967296L, 0L));
-    assertAppendRejected(schema, datasetUri, RowFactory.create(2, (short) -1, 0, 0L, 0L));
+    assertAppendRejected(
+        schema, datasetUri, RowFactory.create(2, (short) 256, 0, 0L, 0L), "[0, 255], got 256");
+    assertAppendRejected(
+        schema,
+        datasetUri,
+        RowFactory.create(2, (short) 0, 65536, 0L, 0L),
+        "[0, 65535], got 65536");
+    assertAppendRejected(
+        schema,
+        datasetUri,
+        RowFactory.create(2, (short) 0, 0, 4294967296L, 0L),
+        "[0, 4294967295], got 4294967296");
+    assertAppendRejected(
+        schema, datasetUri, RowFactory.create(2, (short) -1, 0, 0L, 0L), "[0, 255], got -1");
 
-    // None of the rejected appends may have published a row.
     assertEquals(
         1L,
         spark.read().format(LanceDataSource.name).load(datasetUri).count(),
         "a rejected append must not add rows");
   }
 
-  private void assertAppendRejected(StructType schema, String datasetUri, Row row) {
-    assertThrows(
-        Exception.class,
-        () ->
-            spark
-                .createDataFrame(Collections.singletonList(row), schema)
-                .write()
-                .format(LanceDataSource.name)
-                .mode(SaveMode.Append)
-                .save(datasetUri));
+  private void assertAppendRejected(
+      StructType schema, String datasetUri, Row row, String expected) {
+    Exception e =
+        assertThrows(
+            Exception.class,
+            () ->
+                spark
+                    .createDataFrame(Collections.singletonList(row), schema)
+                    .write()
+                    .format(LanceDataSource.name)
+                    .mode(SaveMode.Append)
+                    .save(datasetUri));
+    for (Throwable t = e; t != null; t = t.getCause()) {
+      if (t.getMessage() != null && t.getMessage().contains(expected)) {
+        return;
+      }
+    }
+    fail("expected \"" + expected + "\" in the failure chain", e);
   }
 }

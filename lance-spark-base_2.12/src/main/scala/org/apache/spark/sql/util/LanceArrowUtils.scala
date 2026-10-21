@@ -55,7 +55,7 @@ object LanceArrowUtils {
   // Spark has no unsigned integer types, so fromArrowField widens UInt8/16/32/64 to
   // Short/Int/Long/Long. This records the original unsigned width so writeback reproduces the
   // unsigned Arrow type instead of a signed one.
-  val ARROW_UNSIGNED_INT_BIT_WIDTH_KEY = "arrow.unsigned_int_bit_width"
+  val ARROW_UNSIGNED_INT_BIT_WIDTH_KEY = "arrow.unsigned-int.bit-width"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
@@ -277,10 +277,6 @@ object LanceArrowUtils {
         // FixedSizeBinary(n) instead of falling back to variable-length Binary.
         builder.putLong(ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY, fsb.getByteWidth.toLong)
       case int: ArrowType.Int if !int.getIsSigned =>
-        // Record the unsigned width so writeback reproduces the unsigned Arrow type. Without it a
-        // Lance unsigned column is silently widened to a signed one on any schema round-trip
-        // (UPDATE, ADD COLUMNS FROM, read -> transform -> write) and the write then fails type
-        // validation against the existing Lance schema, exactly like the LargeBinary marker above.
         builder.putLong(ARROW_UNSIGNED_INT_BIT_WIDTH_KEY, int.getBitWidth.toLong)
       case _ =>
     }
@@ -338,8 +334,8 @@ object LanceArrowUtils {
   // marker copied onto an unrelated column by a Spark transform from minting a bogus Arrow type.
   private def isUnsignedWidthValid(dt: DataType, bitWidth: Long): Boolean = dt match {
     case ShortType => bitWidth == 8
-    case IntegerType => bitWidth == 8 * 2
-    case LongType => bitWidth == 8 * 4 || bitWidth == 8 * 8
+    case IntegerType => bitWidth == 16
+    case LongType => bitWidth == 32 || bitWidth == 64
     case _ => false
   }
 

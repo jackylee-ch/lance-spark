@@ -709,10 +709,6 @@ public class SchemaConverterTest {
 
   @Test
   public void testUnsignedIntWidthSurvivesSchemaRoundTrip() {
-    // Spark has no unsigned integer types, so a Lance UInt column is widened to a signed Spark
-    // type on read. Without a width marker the writeback silently emits a signed Arrow type, which
-    // then fails validation against the existing Lance schema on any round trip (UPDATE, ADD
-    // COLUMNS FROM, read -> transform -> write).
     Schema arrowSchema =
         new Schema(
             Arrays.asList(
@@ -722,7 +718,6 @@ public class SchemaConverterTest {
                 unsignedIntField("u64", 64, false),
                 unsignedIntField("i64", 64, true)));
 
-    // Read widens every unsigned width to the smallest signed Spark type that holds it.
     StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
     assertEquals(DataTypes.ShortType, sparkSchema.apply("u8").dataType());
     assertEquals(DataTypes.IntegerType, sparkSchema.apply("u16").dataType());
@@ -730,17 +725,27 @@ public class SchemaConverterTest {
     assertEquals(DataTypes.LongType, sparkSchema.apply("u64").dataType());
     assertEquals(DataTypes.LongType, sparkSchema.apply("i64").dataType());
 
-    // Writeback reproduces the original unsigned Arrow types.
     Schema back = LanceArrowUtils.toArrowSchema(sparkSchema, null, true);
     assertUnsignedInt(back, "u8", 8);
     assertUnsignedInt(back, "u16", 16);
     assertUnsignedInt(back, "u32", 32);
     assertUnsignedInt(back, "u64", 64);
-    // The genuinely signed int64 carries no marker and must stay signed, so a marker copied onto
-    // an unrelated column cannot mint a bogus unsigned type.
     ArrowType.Int i64 = (ArrowType.Int) back.findField("i64").getType();
     assertEquals(64, i64.getBitWidth());
     assertTrue(i64.getIsSigned());
+
+    StructType copied =
+        new StructType()
+            .add(
+                "c",
+                DataTypes.LongType,
+                true,
+                new MetadataBuilder()
+                    .putLong(LanceArrowUtils.ARROW_UNSIGNED_INT_BIT_WIDTH_KEY(), 8)
+                    .build());
+    assertTrue(
+        ((ArrowType.Int) LanceArrowUtils.toArrowSchema(copied, null, true).findField("c").getType())
+            .getIsSigned());
   }
 
   private static Field unsignedIntField(String name, int bitWidth, boolean signed) {
