@@ -915,6 +915,39 @@ class TestDDLIndex:
         )
         assert spark.sql("SELECT * FROM default.test_table").count() == 4
 
+    def test_optimize_index(self, spark):
+        """Test incremental index maintenance through Spark SQL."""
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'one'), (2, 'two')")
+        spark.sql("""
+            ALTER TABLE default.test_table
+            CREATE INDEX idx_id USING zonemap (id)
+        """)
+        spark.sql("INSERT INTO default.test_table VALUES (3, 'three')")
+
+        before = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert before.num_unindexed_fragments > 0
+
+        result = spark.sql("""
+            ALTER TABLE default.test_table OPTIMIZE INDEX idx_id
+            WITH (num_indices_to_merge = 0)
+        """).first()
+
+        assert result.index_name == "idx_id"
+        assert result.fragments_indexed == before.num_unindexed_fragments
+        assert result.segments_after >= result.segments_before
+
+        after = next(
+            row
+            for row in spark.sql("SHOW INDEXES IN default.test_table").collect()
+            if row.name == "idx_id"
+        )
+        assert after.num_unindexed_fragments == 0
+
     def test_create_btree_index_on_nested_literal_dot_field(self, spark):
         """Test CREATE INDEX on nested struct fields, including literal dots."""
         spark.sql("""
@@ -1310,9 +1343,13 @@ class TestDDLVacuum:
         # Verify output schema
         assert len(result) == 1
         row = result[0]
-        # VACUUM returns: bytes_removed, old_versions
+        # The current version still references all data files.
         assert row.bytes_removed >= 0
         assert row.old_versions >= 0
+        assert row.data_files_removed == 0
+        assert row.transaction_files_removed >= 0
+        assert row.index_files_removed == 0
+        assert row.deletion_files_removed == 0
 
     def test_vacuum_with_before_version(self, spark):
         """Test VACUUM with before_version option."""
@@ -1401,9 +1438,10 @@ class TestDDLVacuum:
             df.writeTo("default.test_table").append()
 
         # Optimize to compact fragments
-        spark.sql("""
+        optimized = spark.sql("""
             OPTIMIZE default.test_table WITH (target_rows_per_fragment = 100)
-        """)
+        """).collect()[0]
+        assert optimized.files_removed > 0
 
         # Vacuum to remove old fragment files
         result = spark.sql("""
@@ -1413,8 +1451,12 @@ class TestDDLVacuum:
         assert len(result) == 1
         row = result[0]
         # After optimize, vacuum should clean up the old fragments
-        assert row.bytes_removed >= 0
-        assert row.old_versions >= 0
+        assert row.bytes_removed > 0
+        assert row.old_versions > 0
+        assert row.data_files_removed == optimized.files_removed
+        assert row.transaction_files_removed > 0
+        assert row.index_files_removed == 0
+        assert row.deletion_files_removed == 0
 
         # Verify data integrity
         count = spark.table("default.test_table").count()
