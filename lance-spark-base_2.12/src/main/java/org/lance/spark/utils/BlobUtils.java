@@ -377,7 +377,7 @@ public class BlobUtils {
       return;
     }
     for (FragmentMetadata fragment : fragments) {
-      for (DataFile file : fragment.getFiles()) {
+      for (DataFile file : fragment.getReferencedLanceFiles()) {
         if (isBlobV2FileFormat(file)) {
           throw new IllegalArgumentException(
               "Legacy (v1) blob columns "

@@ -422,7 +422,8 @@ public class LanceDataset
 
   /**
    * Like {@link #requireWritable}, for a {@code command} that only manages the table's tags,
-   * branches or old versions. It commits no table version, so it cannot leave the table unreadable.
+   * branches or old versions. None of them builds a manifest from the table's data files (a branch
+   * is a shallow clone), so they cannot leave the table unreadable.
    */
   public static LanceDataset requireWritableRef(Table table, String command) {
     if (!(table instanceof LanceDataset)) {
@@ -512,8 +513,6 @@ public class LanceDataset
             .filter(t -> !t.isEmpty())
             .collect(Collectors.toList());
     if (!backfillColumns.isEmpty()) {
-      // Backfills keep the table's data files, so they cannot repair it.
-      checkBlobV1DataFiles();
       return new AddColumnsBackfillWrite.AddColumnsWriteBuilder(
           sparkSchema,
           writeOptions,
@@ -532,7 +531,6 @@ public class LanceDataset
             .filter(t -> !t.isEmpty())
             .collect(Collectors.toList());
     if (!updateColumns.isEmpty()) {
-      checkBlobV1DataFiles();
       return new UpdateColumnsBackfillWrite.UpdateColumnsWriteBuilder(
           sparkSchema,
           writeOptions,

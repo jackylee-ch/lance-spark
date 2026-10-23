@@ -713,8 +713,8 @@ Earlier connector releases, on Lance 12, accepted such writes and kept the field
 stored the new data files at the requested version. With Lance 13, any commit to a table that
 holds such a file turns its v1 blob fields into blob v2 and leaves the new version unreadable.
 Until the connector moves to a Lance release that reads these files, it rejects every write
-and command that would commit to such a table, except an overwrite at `2.1`; reads, tags,
-branches and `VACUUM` still work.
+and command that would commit to such a table, except an overwrite or replace, which rewrites
+all of its files; reads, tags, branches and `VACUUM` still work.
 
 If the table's v1 blob fields are all top-level columns, overwrite it with its own rows at
 `2.1`:
