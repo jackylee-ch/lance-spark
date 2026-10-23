@@ -292,6 +292,9 @@ public class LanceBatchWrite implements BatchWrite {
    *       timestamp's time zone.
    * </ul>
    *
+   * <p>In both modes, reject a value outside an unsigned integer column's range, as {@link
+   * LanceDataWriter} does: narrowing it stores a different value, which Lance accepts.
+   *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}
    * @throws NullPointerException if {@code fragments} is null or contains a null element
