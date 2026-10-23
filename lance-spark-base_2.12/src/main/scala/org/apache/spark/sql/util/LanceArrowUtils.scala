@@ -52,13 +52,14 @@ object LanceArrowUtils {
   val ARROW_DATE_MILLISECOND_KEY = DateMilliUtils.ARROW_DATE_MILLISECOND_KEY
   val ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY =
     FixedSizeBinaryUtils.ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY
-  // Spark has no unsigned integer types, so fromArrowField widens UInt8/16/32/64 to
-  // Short/Int/Long/Long. This records the original unsigned width so writeback reproduces the
-  // unsigned Arrow type instead of a signed one.
-  val ARROW_UNSIGNED_INT_BIT_WIDTH_KEY = "arrow.unsigned-int.bit-width"
 
   val LANCE_TIMESTAMP_UNIT_KEY = "_lance.timestamp_unit"
   val LANCE_TIMESTAMP_TIMEZONE_KEY = "_lance.timestamp_timezone"
+
+  // Spark has no unsigned integer types, so reads widen UInt8/16/32/64 to Short/Int/Long/Long.
+  // Writes into an existing table set this key from the table's Lance schema (see
+  // withUnsignedIntTypes) so toArrowField writes those columns back with their unsigned type.
+  val LANCE_UNSIGNED_INT_BIT_WIDTH_KEY = "_lance.unsigned_int_bit_width"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
   // child sits inside an ArrayType/MapType — Spark has no per-element metadata slot of its
@@ -79,6 +80,7 @@ object LanceArrowUtils {
   private val LANCE_INTERNAL_METADATA_KEYS = Set(
     LANCE_TIMESTAMP_UNIT_KEY,
     LANCE_TIMESTAMP_TIMEZONE_KEY,
+    LANCE_UNSIGNED_INT_BIT_WIDTH_KEY,
     LANCE_ELEMENT_METADATA_KEY,
     LANCE_MAP_KEY_METADATA_KEY,
     LANCE_MAP_VALUE_METADATA_KEY,
@@ -286,8 +288,6 @@ object LanceArrowUtils {
         // Preserve FixedSizeBinary byte width so a subsequent write reproduces
         // FixedSizeBinary(n) instead of falling back to variable-length Binary.
         builder.putLong(ARROW_FIXED_SIZE_BINARY_BYTE_WIDTH_KEY, fsb.getByteWidth.toLong)
-      case int: ArrowType.Int if !int.getIsSigned =>
-        builder.putLong(ARROW_UNSIGNED_INT_BIT_WIDTH_KEY, int.getBitWidth.toLong)
       case _ =>
     }
   }
@@ -339,15 +339,83 @@ object LanceArrowUtils {
   private def hasContent(metadata: Metadata): Boolean =
     metadata != null && metadata.json != "{}"
 
-  // A recorded unsigned width is honored only when it matches how fromArrowField widened the
-  // corresponding Arrow type (UInt8->Short, UInt16->Int, UInt32/UInt64->Long). This keeps a
-  // marker copied onto an unrelated column by a Spark transform from minting a bogus Arrow type.
-  private def isUnsignedWidthValid(dt: DataType, bitWidth: Long): Boolean = dt match {
+  /**
+   * Marks the columns of `schema` that are unsigned integers in `destination`, the Lance schema of
+   * the table being written, so toArrowSchema writes them back unsigned. Columns are matched by
+   * name, including struct fields, list elements and map keys and values. A column is marked only
+   * if its Spark type is the one fromArrowSchema reads that unsigned width as.
+   */
+  def withUnsignedIntTypes(schema: StructType, destination: Schema): StructType =
+    markUnsignedFields(schema, destination.getFields.asScala)
+
+  private def markUnsignedFields(schema: StructType, destination: Iterable[Field]): StructType = {
+    val destinationByName = destination.map(field => field.getName -> field).toMap
+    StructType(schema.fields.map { field =>
+      destinationByName.get(field.name) match {
+        case Some(destinationField) =>
+          val (dataType, metadata) =
+            withUnsignedIntType(field.dataType, field.metadata, destinationField)
+          field.copy(dataType = dataType, metadata = metadata)
+        case None => field
+      }
+    })
+  }
+
+  // Returns the data type with nested struct fields marked, and the metadata of this position,
+  // which for a list element or map key or value is embedded in its parent's metadata.
+  private def withUnsignedIntType(
+      dt: DataType,
+      metadata: Metadata,
+      destination: Field): (DataType, Metadata) = (dt, destination.getType) match {
+    case (_, int: ArrowType.Int) if !int.getIsSigned && isUnsignedWidthValid(dt, int.getBitWidth) =>
+      val marked = new MetadataBuilder()
+        .withMetadata(metadata)
+        .putLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY, int.getBitWidth.toLong)
+        .build()
+      (dt, marked)
+    case (struct: StructType, _: ArrowType.Struct) =>
+      (markUnsignedFields(struct, destination.getChildren.asScala), metadata)
+    case (
+          ArrayType(elementType, containsNull),
+          _: ArrowType.List | _: ArrowType.LargeList |
+          _: ArrowType.FixedSizeList) =>
+      val (element, elementMetadata) = withUnsignedIntType(
+        elementType,
+        parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY),
+        destination.getChildren.get(0))
+      (
+        ArrayType(element, containsNull),
+        withEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY, elementMetadata))
+    case (MapType(keyType, valueType, valueContainsNull), _: ArrowType.Map) =>
+      val entries = destination.getChildren.get(0).getChildren
+      val (key, keyMetadata) = withUnsignedIntType(
+        keyType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY),
+        entries.get(0))
+      val (value, valueMetadata) = withUnsignedIntType(
+        valueType,
+        parseEmbeddedMetadata(metadata, LANCE_MAP_VALUE_METADATA_KEY),
+        entries.get(1))
+      val withKey = withEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY, keyMetadata)
+      (
+        MapType(key, value, valueContainsNull),
+        withEmbeddedMetadata(withKey, LANCE_MAP_VALUE_METADATA_KEY, valueMetadata))
+    case _ => (dt, metadata)
+  }
+
+  private def isUnsignedWidthValid(dt: DataType, bitWidth: Int): Boolean = dt match {
     case ShortType => bitWidth == 8
     case IntegerType => bitWidth == 16
     case LongType => bitWidth == 32 || bitWidth == 64
     case _ => false
   }
+
+  private def withEmbeddedMetadata(parent: Metadata, key: String, child: Metadata): Metadata =
+    if (hasContent(child)) {
+      new MetadataBuilder().withMetadata(parent).putString(key, child.json).build()
+    } else {
+      parent
+    }
 
   private def parseEmbeddedMetadata(parent: Metadata, key: String): Metadata = {
     if (parent == null || !parent.contains(key)) {
@@ -566,10 +634,8 @@ object LanceArrowUtils {
             arrowUInt64Field("position"),
             arrowUInt64Field("size")).asJava)
       case ShortType | IntegerType | LongType
-          if metadata != null
-            && metadata.contains(ARROW_UNSIGNED_INT_BIT_WIDTH_KEY)
-            && isUnsignedWidthValid(dt, metadata.getLong(ARROW_UNSIGNED_INT_BIT_WIDTH_KEY)) =>
-        val bitWidth = metadata.getLong(ARROW_UNSIGNED_INT_BIT_WIDTH_KEY).toInt
+          if metadata != null && metadata.contains(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY) =>
+        val bitWidth = metadata.getLong(LANCE_UNSIGNED_INT_BIT_WIDTH_KEY).toInt
         val fieldType =
           new FieldType(nullable, new ArrowType.Int(bitWidth, false), null, meta.asJava)
         new Field(name, fieldType, Seq.empty[Field].asJava)

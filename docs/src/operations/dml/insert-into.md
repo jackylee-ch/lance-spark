@@ -8,6 +8,11 @@ while nanosecond values lose sub-microsecond precision when read through Spark.
 Conversions outside the target unit's range are rejected. New timestamp columns
 continue to use microseconds.
 
+Writes to existing unsigned integer columns keep their unsigned type, and values
+outside the `uint8`, `uint16` or `uint32` range are rejected. Spark reads `uint8`,
+`uint16`, `uint32` and `uint64` as `SMALLINT`, `INT`, `BIGINT` and `BIGINT`; new
+tables, including ones created from an unsigned column, use those Spark types.
+
 ## Basic Insert
 
 === "SQL"

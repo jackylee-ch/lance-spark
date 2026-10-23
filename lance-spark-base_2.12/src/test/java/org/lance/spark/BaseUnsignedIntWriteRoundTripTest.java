@@ -32,6 +32,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -46,7 +47,6 @@ import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -67,6 +67,9 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
         SparkSession.builder()
             .appName("unsigned-int-write-roundtrip-test")
             .master("local[*]")
+            .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+            .config(
+                "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .getOrCreate();
   }
 
@@ -126,16 +129,31 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     }
   }
 
-  private static void assertUnsigned(Schema schema, String name, int expectedWidth) {
-    ArrowType.Int type = (ArrowType.Int) schema.findField(name).getType();
-    assertEquals(expectedWidth, type.getBitWidth(), name + " width");
-    assertFalse(type.getIsSigned(), name + " should be unsigned");
+  private static org.lance.Dataset open(String datasetUri) {
+    return org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(datasetUri).build();
+  }
+
+  private static void assertIntType(Schema schema, String name, int width, boolean signed) {
+    Field field = schema.findField(name);
+    assertEquals(new ArrowType.Int(width, signed), field.getType(), name);
+    assertTrue(field.getMetadata().isEmpty(), name + " metadata " + field.getMetadata());
+  }
+
+  private static void assertUnsignedColumns(String datasetUri) {
+    try (org.lance.Dataset dataset = open(datasetUri)) {
+      Schema schema = dataset.getSchema();
+      assertIntType(schema, "u8", 8, false);
+      assertIntType(schema, "u16", 16, false);
+      assertIntType(schema, "u32", 32, false);
+      assertIntType(schema, "u64", 64, false);
+      assertIntType(schema, "id", 32, true);
+    }
   }
 
   @Test
-  public void testUnsignedWidthsRoundTripThroughSparkWrite() throws Exception {
-    String sourceUri = tempDir.resolve("uint_roundtrip_source.lance").toString();
-    String targetUri = tempDir.resolve("uint_roundtrip_target.lance").toString();
+  public void testNewTableFollowsSparkTypes() throws Exception {
+    String sourceUri = tempDir.resolve("uint_new_table_source.lance").toString();
+    String targetUri = tempDir.resolve("uint_new_table_target.lance").toString();
     createUnsignedDataset(sourceUri);
 
     spark
@@ -147,18 +165,13 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
         .mode(SaveMode.ErrorIfExists)
         .save(targetUri);
 
-    try (org.lance.Dataset dataset =
-        org.lance.Dataset.open().allocator(LanceRuntime.allocator()).uri(targetUri).build()) {
+    try (org.lance.Dataset dataset = open(targetUri)) {
       Schema written = dataset.getSchema();
-      assertUnsigned(written, "u8", 8);
-      assertUnsigned(written, "u16", 16);
-      assertUnsigned(written, "u32", 32);
-      assertUnsigned(written, "u64", 64);
-      ArrowType.Int id = (ArrowType.Int) written.findField("id").getType();
-      assertEquals(32, id.getBitWidth());
-      assertTrue(id.getIsSigned());
+      assertIntType(written, "u8", 16, true);
+      assertIntType(written, "u16", 32, true);
+      assertIntType(written, "u32", 64, true);
+      assertIntType(written, "u64", 64, true);
     }
-
     List<Row> rows =
         spark
             .read()
@@ -171,6 +184,118 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertEquals(65535, rows.get(0).getInt(1));
     assertEquals(4294967295L, rows.get(0).getLong(2));
     assertEquals(9000000000L, rows.get(0).getLong(3));
+
+    String source = "lance.`" + sourceUri + "`";
+    String[] queries = {
+      "SELECT u32 FROM " + source + " UNION ALL SELECT -5L",
+      "SELECT -5L AS u32 UNION ALL SELECT u32 FROM " + source
+    };
+    for (int i = 0; i < queries.length; i++) {
+      String unionUri = tempDir.resolve("uint_union_" + i + ".lance").toString();
+      spark.sql("CREATE TABLE lance.`" + unionUri + "` AS " + queries[i]);
+      try (org.lance.Dataset dataset = open(unionUri)) {
+        assertIntType(dataset.getSchema(), "u32", 64, true);
+        assertEquals(2L, dataset.countRows());
+      }
+    }
+  }
+
+  @Test
+  public void testInsertOverwriteKeepsUnsignedTypes() throws Exception {
+    String datasetUri = tempDir.resolve("uint_overwrite.lance").toString();
+    createUnsignedDataset(datasetUri);
+
+    spark.sql(
+        "INSERT OVERWRITE lance.`"
+            + datasetUri
+            + "` VALUES (2, 200, 40000, 3000000000, 5000000000)");
+
+    assertUnsignedColumns(datasetUri);
+    List<Row> rows =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .load(datasetUri)
+            .selectExpr("id", "u8", "u16", "u32", "u64")
+            .collectAsList();
+    assertEquals(1, rows.size());
+    assertEquals(RowFactory.create(2, (short) 200, 40000, 3000000000L, 5000000000L), rows.get(0));
+  }
+
+  @Test
+  public void testUpdateKeepsUnsignedTypes() throws Exception {
+    String datasetUri = tempDir.resolve("uint_update.lance").toString();
+    createUnsignedDataset(datasetUri);
+
+    spark.sql("UPDATE lance.`" + datasetUri + "` SET u8 = 254 WHERE id = 1");
+
+    assertUnsignedColumns(datasetUri);
+    List<Row> rows =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .load(datasetUri)
+            .selectExpr("id", "u8", "u16", "u32", "u64")
+            .collectAsList();
+    assertEquals(
+        Collections.singletonList(
+            RowFactory.create(1, (short) 254, 65535, 4294967295L, 9000000000L)),
+        rows);
+  }
+
+  @Test
+  public void testUpdateColumnsKeepsUnsignedTypes() throws Exception {
+    String datasetUri = tempDir.resolve("uint_update_columns.lance").toString();
+    createUnsignedDataset(datasetUri);
+    String table = "lance.`" + datasetUri + "`";
+
+    spark
+        .sql("SELECT _rowaddr, _fragid, CAST(7 AS SMALLINT) AS u8 FROM " + table)
+        .createOrReplaceTempView("uint_update_source");
+    spark.sql("ALTER TABLE " + table + " UPDATE COLUMNS u8 FROM uint_update_source");
+
+    assertUnsignedColumns(datasetUri);
+    assertEquals(
+        (short) 7,
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .load(datasetUri)
+            .selectExpr("u8")
+            .first()
+            .getShort(0));
+  }
+
+  @Test
+  public void testWidenedColumnCanBeRewrittenAfterReload() throws Exception {
+    String sourceUri = tempDir.resolve("uint_widened_source.lance").toString();
+    String targetUri = tempDir.resolve("uint_widened_target.lance").toString();
+    createUnsignedDataset(sourceUri);
+
+    StructType widened =
+        new StructType().add("id", DataTypes.IntegerType).add("u8", DataTypes.IntegerType);
+    spark
+        .read()
+        .format(LanceDataSource.name)
+        .load(sourceUri)
+        .select("id", "u8")
+        .to(widened)
+        .write()
+        .format(LanceDataSource.name)
+        .save(targetUri);
+    spark
+        .read()
+        .format(LanceDataSource.name)
+        .load(targetUri)
+        .write()
+        .format(LanceDataSource.name)
+        .mode(SaveMode.Append)
+        .save(targetUri);
+
+    try (org.lance.Dataset dataset = open(targetUri)) {
+      assertIntType(dataset.getSchema(), "u8", 32, true);
+      assertEquals(2L, dataset.countRows());
+    }
   }
 
   @Test
@@ -187,6 +312,7 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
         .mode(SaveMode.Append)
         .save(datasetUri);
 
+    assertUnsignedColumns(datasetUri);
     List<Row> rows =
         spark
             .read()

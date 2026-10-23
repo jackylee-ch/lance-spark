@@ -708,56 +708,58 @@ public class SchemaConverterTest {
   }
 
   @Test
-  public void testUnsignedIntWidthSurvivesSchemaRoundTrip() {
-    Schema arrowSchema =
+  public void testUnsignedIntTypesFollowTheDestinationTable() {
+    Field entries =
+        new Field(
+            "entries",
+            FieldType.notNullable(ArrowType.Struct.INSTANCE),
+            Arrays.asList(
+                new Field("key", FieldType.notNullable(new ArrowType.Int(16, false)), null),
+                intField("value", 32, false)));
+    Schema destination =
         new Schema(
             Arrays.asList(
-                unsignedIntField("u8", 8, false),
-                unsignedIntField("u16", 16, false),
-                unsignedIntField("u32", 32, false),
-                unsignedIntField("u64", 64, false),
-                unsignedIntField("i64", 64, true)));
+                intField("u8", 8, false),
+                intField("u16", 16, false),
+                intField("u32", 32, false),
+                intField("u64", 64, false),
+                intField("i64", 64, true),
+                new Field(
+                    "s",
+                    FieldType.nullable(ArrowType.Struct.INSTANCE),
+                    Collections.singletonList(intField("u", 32, false))),
+                new Field(
+                    "a",
+                    FieldType.nullable(ArrowType.List.INSTANCE),
+                    Collections.singletonList(intField("element", 8, false))),
+                new Field(
+                    "m",
+                    FieldType.nullable(new ArrowType.Map(false)),
+                    Collections.singletonList(entries))));
+    StructType read = LanceArrowUtils.fromArrowSchema(destination);
 
-    StructType sparkSchema = LanceArrowUtils.fromArrowSchema(arrowSchema);
-    assertEquals(DataTypes.ShortType, sparkSchema.apply("u8").dataType());
-    assertEquals(DataTypes.IntegerType, sparkSchema.apply("u16").dataType());
-    assertEquals(DataTypes.LongType, sparkSchema.apply("u32").dataType());
-    assertEquals(DataTypes.LongType, sparkSchema.apply("u64").dataType());
-    assertEquals(DataTypes.LongType, sparkSchema.apply("i64").dataType());
+    Schema newTable = LanceArrowUtils.toArrowSchema(read, "UTC", true);
+    assertEquals(new ArrowType.Int(16, true), newTable.findField("u8").getType());
+    assertEquals(new ArrowType.Int(32, true), newTable.findField("u16").getType());
+    assertEquals(new ArrowType.Int(64, true), newTable.findField("u32").getType());
+    assertEquals(new ArrowType.Int(64, true), newTable.findField("u64").getType());
 
-    Schema back = LanceArrowUtils.toArrowSchema(sparkSchema, null, true);
-    assertUnsignedInt(back, "u8", 8);
-    assertUnsignedInt(back, "u16", 16);
-    assertUnsignedInt(back, "u32", 32);
-    assertUnsignedInt(back, "u64", 64);
-    ArrowType.Int i64 = (ArrowType.Int) back.findField("i64").getType();
-    assertEquals(64, i64.getBitWidth());
-    assertTrue(i64.getIsSigned());
+    StructType write = LanceArrowUtils.withUnsignedIntTypes(read, destination);
+    assertEquals(destination, LanceArrowUtils.toArrowSchema(write, "UTC", true));
 
-    StructType copied =
-        new StructType()
-            .add(
-                "c",
-                DataTypes.LongType,
-                true,
-                new MetadataBuilder()
-                    .putLong(LanceArrowUtils.ARROW_UNSIGNED_INT_BIT_WIDTH_KEY(), 8)
-                    .build());
-    assertTrue(
-        ((ArrowType.Int) LanceArrowUtils.toArrowSchema(copied, null, true).findField("c").getType())
-            .getIsSigned());
+    StructType widened =
+        new StructType().add("u8", DataTypes.IntegerType).add("u16", DataTypes.LongType);
+    Schema widenedWrite =
+        LanceArrowUtils.toArrowSchema(
+            LanceArrowUtils.withUnsignedIntTypes(widened, destination), "UTC", true);
+    assertEquals(new ArrowType.Int(32, true), widenedWrite.findField("u8").getType());
+    assertEquals(new ArrowType.Int(64, true), widenedWrite.findField("u16").getType());
   }
 
-  private static Field unsignedIntField(String name, int bitWidth, boolean signed) {
+  private static Field intField(String name, int bitWidth, boolean signed) {
     return new Field(
         name,
         new FieldType(true, new ArrowType.Int(bitWidth, signed), null, null),
         Collections.emptyList());
-  }
-
-  private static void assertUnsignedInt(Schema schema, String name, int expectedWidth) {
-    ArrowType.Int type = (ArrowType.Int) schema.findField(name).getType();
-    assertEquals(expectedWidth, type.getBitWidth());
-    assertFalse(type.getIsSigned());
   }
 }
