@@ -68,6 +68,10 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
             .appName("unsigned-int-write-roundtrip-test")
             .master("local[*]")
             .config("spark.sql.catalog.lance", "org.lance.spark.LanceNamespaceSparkCatalog")
+            .config("spark.sql.catalog.unsigned_ns", "org.lance.spark.LanceNamespaceSparkCatalog")
+            .config("spark.sql.catalog.unsigned_ns.impl", "dir")
+            .config("spark.sql.catalog.unsigned_ns.root", tempDir.toString())
+            .config("spark.sql.catalog.unsigned_ns.single_level_ns", "true")
             .config(
                 "spark.sql.extensions", "org.lance.spark.extensions.LanceSparkSessionExtensions")
             .getOrCreate();
@@ -251,6 +255,67 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
             .selectExpr("u8")
             .first()
             .getShort(0));
+  }
+
+  @Test
+  public void testRangeBTreeIndexOnUnsignedColumns() throws Exception {
+    createUnsignedDataset(tempDir.resolve("uint_index.lance").toString());
+    String table = "unsigned_ns.default.uint_index";
+    for (String column : new String[] {"u8", "u32"}) {
+      spark.sql(
+          "ALTER TABLE "
+              + table
+              + " CREATE INDEX "
+              + column
+              + "_idx USING btree ("
+              + column
+              + ") WITH (build_mode = 'range')");
+    }
+
+    List<Row> expected = Collections.singletonList(RowFactory.create(1));
+    assertEquals(
+        expected, spark.sql("SELECT id FROM " + table + " WHERE u8 = 255").collectAsList());
+    assertEquals(
+        expected,
+        spark.sql("SELECT id FROM " + table + " WHERE u32 >= 3000000000").collectAsList());
+
+    // Values of 2^63 or more read as negative; the index must still sort them after small values.
+    String uint64Uri = tempDir.resolve("uint64_index.lance").toString();
+    Schema schema =
+        new Schema(
+            Arrays.asList(
+                new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null),
+                unsignedField("u64", 64)));
+    Dataset.write()
+        .allocator(LanceRuntime.allocator())
+        .uri(uint64Uri)
+        .schema(schema)
+        .mode(WriteParams.WriteMode.CREATE)
+        .execute()
+        .close();
+    StructType uint64Schema = spark.read().format(LanceDataSource.name).load(uint64Uri).schema();
+    // One partition, so all four values land in one fragment and one index page.
+    spark
+        .createDataFrame(
+            Arrays.asList(
+                RowFactory.create(1, 1L),
+                RowFactory.create(2, 2L),
+                RowFactory.create(3, Long.MIN_VALUE + 1),
+                RowFactory.create(4, -1L)),
+            uint64Schema)
+        .coalesce(1)
+        .write()
+        .format(LanceDataSource.name)
+        .mode(SaveMode.Append)
+        .save(uint64Uri);
+    String uint64Table = "unsigned_ns.default.uint64_index";
+    spark.sql(
+        "ALTER TABLE "
+            + uint64Table
+            + " CREATE INDEX u64_idx USING btree (u64) WITH (build_mode = 'range')");
+    assertEquals(
+        Collections.singletonList(RowFactory.create(2)),
+        spark.sql("SELECT id FROM " + uint64Table + " WHERE u64 = 2").collectAsList());
   }
 
   @Test
