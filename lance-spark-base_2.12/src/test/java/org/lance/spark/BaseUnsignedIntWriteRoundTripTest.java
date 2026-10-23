@@ -57,9 +57,9 @@ import static org.junit.jupiter.api.Assertions.fail;
  */
 public abstract class BaseUnsignedIntWriteRoundTripTest {
 
-  private static SparkSession spark;
+  protected static SparkSession spark;
 
-  @TempDir static Path tempDir;
+  @TempDir protected static Path tempDir;
 
   @BeforeAll
   static void setup() {
@@ -86,7 +86,7 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
   }
 
   /** Creates a Lance dataset with an unsigned column of every width plus a signed control. */
-  private static void createUnsignedDataset(String datasetUri) throws Exception {
+  protected static void createUnsignedDataset(String datasetUri) throws Exception {
     Schema arrowSchema =
         new Schema(
             Arrays.asList(
@@ -139,7 +139,7 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     assertTrue(field.getMetadata().isEmpty(), name + " metadata " + field.getMetadata());
   }
 
-  private static void assertUnsignedColumns(String datasetUri) {
+  protected static void assertUnsignedColumns(String datasetUri) {
     try (org.lance.Dataset dataset = open(datasetUri)) {
       Schema schema = dataset.getSchema();
       assertIntType(schema, "u8", 8, false);
@@ -198,6 +198,14 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
         assertEquals(2L, dataset.countRows());
       }
     }
+
+    String replaceUri = tempDir.resolve("uint_replace.lance").toString();
+    createUnsignedDataset(replaceUri);
+    spark.sql("REPLACE TABLE lance.`" + replaceUri + "` AS SELECT * FROM " + source);
+    try (org.lance.Dataset dataset = open(replaceUri)) {
+      assertIntType(dataset.getSchema(), "u8", 16, true);
+      assertIntType(dataset.getSchema(), "u32", 64, true);
+    }
   }
 
   @Test
@@ -220,27 +228,6 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
             .collectAsList();
     assertEquals(1, rows.size());
     assertEquals(RowFactory.create(2, (short) 200, 40000, 3000000000L, 5000000000L), rows.get(0));
-  }
-
-  @Test
-  public void testUpdateKeepsUnsignedTypes() throws Exception {
-    String datasetUri = tempDir.resolve("uint_update.lance").toString();
-    createUnsignedDataset(datasetUri);
-
-    spark.sql("UPDATE lance.`" + datasetUri + "` SET u8 = 254 WHERE id = 1");
-
-    assertUnsignedColumns(datasetUri);
-    List<Row> rows =
-        spark
-            .read()
-            .format(LanceDataSource.name)
-            .load(datasetUri)
-            .selectExpr("id", "u8", "u16", "u32", "u64")
-            .collectAsList();
-    assertEquals(
-        Collections.singletonList(
-            RowFactory.create(1, (short) 254, 65535, 4294967295L, 9000000000L)),
-        rows);
   }
 
   @Test

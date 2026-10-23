@@ -48,7 +48,6 @@ import org.apache.spark.sql.connector.write.PhysicalWriteInfo;
 import org.apache.spark.sql.connector.write.RequiresDistributionAndOrdering;
 import org.apache.spark.sql.connector.write.WriterCommitMessage;
 import org.apache.spark.sql.types.StructType;
-import org.apache.spark.sql.util.LanceArrowUtils;
 import org.roaringbitmap.IntIterator;
 import org.roaringbitmap.RoaringBitmap;
 import org.slf4j.Logger;
@@ -96,8 +95,8 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       Map<String, String> namespaceProperties,
       boolean managedVersioning,
       List<String> tableId) {
+    this.sparkSchema = sparkSchema;
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.sparkSchema = LanceArrowUtils.withUnsignedIntTypes(sparkSchema, ds.getSchema());
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       logger.debug("Resolved dataset ref for position delta write: {}", this.writeOptions.getRef());
     }

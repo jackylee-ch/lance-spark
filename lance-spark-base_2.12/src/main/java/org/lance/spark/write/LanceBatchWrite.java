@@ -287,8 +287,9 @@ public class LanceBatchWrite implements BatchWrite {
    *       {@code WriteMode.CREATE}, so the data files use the table's field ids; and
    *   <li>if it is true, write in {@code WriteMode.OVERWRITE} without passing the table's schema to
    *       {@code WriteFragmentBuilder.schema(...)}, and with the column types of {@link
-   *       #getCommitSchema()}. Timestamps must use the same unit, and strings and binaries the same
-   *       offset width. The stream may leave out a timestamp's time zone.
+   *       #getCommitSchema()}. Timestamps must use the same unit, integers the same width and
+   *       signedness, and strings and binaries the same offset width. The stream may leave out a
+   *       timestamp's time zone.
    * </ul>
    *
    * @param fragments uncommitted fragments produced by a task

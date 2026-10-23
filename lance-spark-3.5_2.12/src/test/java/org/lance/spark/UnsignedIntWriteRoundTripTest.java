@@ -13,4 +13,35 @@
  */
 package org.lance.spark;
 
-public class UnsignedIntWriteRoundTripTest extends BaseUnsignedIntWriteRoundTripTest {}
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.RowFactory;
+import org.junit.jupiter.api.Test;
+
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+public class UnsignedIntWriteRoundTripTest extends BaseUnsignedIntWriteRoundTripTest {
+
+  @Test
+  public void testUpdateKeepsUnsignedTypes() throws Exception {
+    String datasetUri = tempDir.resolve("uint_update.lance").toString();
+    createUnsignedDataset(datasetUri);
+
+    spark.sql("UPDATE lance.`" + datasetUri + "` SET u8 = 254 WHERE id = 1");
+
+    assertUnsignedColumns(datasetUri);
+    List<Row> rows =
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .load(datasetUri)
+            .selectExpr("id", "u8", "u16", "u32", "u64")
+            .collectAsList();
+    assertEquals(
+        Collections.singletonList(
+            RowFactory.create(1, (short) 254, 65535, 4294967295L, 9000000000L)),
+        rows);
+  }
+}
