@@ -48,7 +48,7 @@ case class VacuumExec(
   }
 
   override protected def run(): Seq[InternalRow] = {
-    val lanceDataset = LanceDataset.requireWritable(catalog.loadTable(ident), "Vacuum")
+    val lanceDataset = LanceDataset.requireWritableRef(catalog.loadTable(ident), "Vacuum")
 
     val policy = buildPolicy()
     val readOptions = lanceDataset.readOptions()

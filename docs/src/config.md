@@ -709,11 +709,15 @@ A schema that mixes v1 and v2 blob columns is rejected as well, because no singl
 format version can store both. The same holds for writes: a `file_format_version` of `2.2` or
 newer, `stable` or `next` is rejected for a table with v1 blob fields, top-level or nested.
 
-Earlier connector releases, on Lance 12, accepted such writes and kept the columns v1, but
+Earlier connector releases, on Lance 12, accepted such writes and kept the fields v1, but
 stored the new data files at the requested version. With Lance 13, any commit to a table that
-holds such a file turns its v1 blob columns into blob v2 and leaves the new version unreadable.
-If a table with v1 blob columns was ever written or created at `2.2` or newer, `stable` or
-`next`, overwrite it with its own rows at `2.1` before any other commit to it:
+holds such a file turns its v1 blob fields into blob v2 and leaves the new version unreadable.
+Until the connector moves to a Lance release that reads these files, it rejects every write
+and command that would commit to such a table, except an overwrite at `2.1`; reads, tags,
+branches and `VACUUM` still work.
+
+If the table's v1 blob fields are all top-level columns, overwrite it with its own rows at
+`2.1`:
 
 ```python
 from pyspark.sql.functions import lit
@@ -724,12 +728,16 @@ spark.table("lance.ns.docs").writeTo("lance.ns.docs") \
 ```
 
 The overwrite rewrites every row, including the blob bytes, drops the table's indexes, which
-have to be rebuilt afterwards, and assigns new row ids on tables with stable row ids.
+have to be rebuilt afterwards, and assigns new row ids on tables with stable row ids. Nested
+v1 blob fields, such as `payload.data`, read back empty in Spark
+([#852](https://github.com/lance-format/lance-spark/issues/852)), so overwriting such a table
+with its own rows would replace their bytes with empty values; overwrite it from its source
+data instead.
 
-A table a commit already broke still reads at its earlier versions. Restore the last readable
-one with Lance, for example `lance.dataset(uri, version=n).restore()`, then overwrite it as
-above; writes made after version `n` have to be redone. Do not `VACUUM` the table before that,
-since it can remove the versions that still read.
+A table that another Lance 13 client already broke still reads at its earlier versions.
+Restore the last readable one with Lance, for example `lance.dataset(uri, version=n).restore()`,
+then repair it as above; writes made after version `n` have to be redone. Do not `VACUUM` the
+table before that, since it can remove the versions that still read.
 
 With an older version, such as `2.0`, `2.1` or `legacy`, blob columns use the legacy v1
 encoding with `lance-encoding:blob = true` metadata. Pin one of those versions to keep a
