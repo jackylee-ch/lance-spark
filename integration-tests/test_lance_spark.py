@@ -3033,6 +3033,150 @@ class TestDQLTimeTravel:
             (4, "after_tag_2"),
         ]
 
+    @pytest.mark.parametrize("tag", ["stable", "123"])
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG", "TAG"])
+    def test_tag_read_option_matches_sql_and_path(self, spark, tag, tag_option):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
+        spark.sql(f"ALTER TABLE default.test_table CREATE TAG `{tag}`")
+        spark.sql("INSERT INTO default.test_table VALUES (2, 'main')")
+
+        expected = [(1, "tagged")]
+        table = spark.read.option(tag_option, tag).table("default.test_table")
+        path = (
+            spark.read.format("lance").option(tag_option, tag)
+            .load(_table_location(spark, "default.test_table"))
+        )
+        for tagged in (table, path):
+            assert [(row.id, row.name) for row in tagged.collect()] == expected
+            assert tagged.count() == 1
+        assert spark.table("default.test_table").count() == 2
+
+    @pytest.mark.parametrize("reference,value", [("tag", "stable"), ("version", "2")])
+    def test_snapshot_read_option_validates_projection_after_add_columns(
+        self, spark, reference, value
+    ):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        spark.sql("""
+            CREATE OR REPLACE TEMP VIEW tag_extra AS
+            SELECT _rowaddr, _fragid, CAST(5 AS INT) AS extra FROM default.test_table
+        """)
+        try:
+            spark.sql("ALTER TABLE default.test_table ADD COLUMNS extra FROM tag_extra")
+        finally:
+            spark.catalog.dropTempView("tag_extra")
+
+        tagged = spark.read.option(reference, value).table("default.test_table")
+        assert [(row.id, row.name) for row in tagged.select("id", "name").collect()] == [
+            (1, "tagged"),
+        ]
+        assert tagged.count() == 1
+        assert tagged.select("_rowid").collect()[0]._rowid is not None
+        with pytest.raises(Exception, match="extra.*snapshot"):
+            tagged._jdf.queryExecution().optimizedPlan()
+        assert spark.sql(
+            "SELECT * FROM default.test_table VERSION AS OF 'stable'"
+        ).columns == ["id", "name"]
+
+    @pytest.mark.parametrize("column", ["id", "payload.value"])
+    @pytest.mark.parametrize("reference,value", [("tag", "stable"), ("version", "2")])
+    def test_snapshot_read_option_rejects_changed_types_during_planning(
+        self, spark, column, reference, value
+    ):
+        if getattr(spark, "_lance_backend", None) == "lancedb":
+            pytest.skip("Direct schema evolution requires a filesystem-backed table")
+        spark.sql("""
+            CREATE TABLE default.test_table (
+                id INT, name STRING, payload STRUCT<value: INT, label: STRING>
+            )
+        """)
+        spark.sql("""
+            INSERT INTO default.test_table
+            VALUES (1, 'tagged', named_struct('value', 7, 'label', 'unchanged'))
+        """)
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        jvm = spark._jvm
+        options = getattr(jvm.org.lance.spark.LanceSparkReadOptions, "from")(
+            _java_hash_map(spark, _lance_storage_options(spark)),
+            _table_location(spark, "default.test_table"),
+        )
+        dataset = jvm.org.lance.spark.utils.Utils.openDatasetBuilder(options).build()
+        try:
+            alteration = getattr(jvm.org.lance.schema, "ColumnAlteration$Builder")(column) \
+                .castTo(getattr(jvm.org.apache.arrow.vector.types.pojo, "ArrowType$Int")(64, True)) \
+                .build()
+            dataset.alterColumns(jvm.java.util.Collections.singletonList(alteration))
+        finally:
+            dataset.close()
+        spark.catalog.refreshTable("default.test_table")
+
+        table = spark.read.option(reference, value).table("default.test_table")
+        path = spark.read.format("lance").option(reference, value).load(
+            _table_location(spark, "default.test_table")
+        )
+        for tagged in (table, path):
+            assert tagged.select("name", "payload.label").collect()[0].label == "unchanged"
+            with pytest.raises(Exception, match=f"{column}.*snapshot"):
+                tagged.select(column)._jdf.queryExecution().optimizedPlan()
+            with pytest.raises(Exception, match=f"{column}.*snapshot"):
+                tagged._jdf.queryExecution().optimizedPlan()
+        historical = spark.sql(
+            "SELECT * FROM default.test_table VERSION AS OF 'stable'"
+        )
+        assert historical.schema["id"].dataType.simpleString() == "int"
+        assert historical.schema["payload"].dataType["value"].dataType.simpleString() == "int"
+        assert historical.collect()[0].payload.value == 7
+
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG"])
+    def test_tag_read_option_rejects_conflicts(self, spark, tag_option):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        spark.sql("ALTER TABLE default.test_table CREATE BRANCH audit")
+        location = _table_location(spark, "default.test_table")
+
+        for option, value in (
+            ("version", "2"), ("VERSION", "2"), ("branch", "audit"), ("BrAnCh", "audit"),
+        ):
+            with pytest.raises(Exception, match="Specify only one"):
+                spark.read.option(tag_option, "stable").option(option, value).table(
+                    "default.test_table"
+                ).collect()
+            with pytest.raises(Exception, match="Specify only one"):
+                spark.read.format("lance").option(tag_option, "stable").option(
+                    option, value
+                ).load(location).collect()
+        with pytest.raises(Exception, match="missing_tag"):
+            spark.read.option(tag_option, "missing_tag").table(
+                "default.test_table"
+            ).collect()
+        with pytest.raises(Exception, match="Cannot combine"):
+            spark.read.option(tag_option, "stable").table(
+                "default.test_table.branch_audit"
+            ).collect()
+
+    @pytest.mark.parametrize("tag_option", ["tag", "TaG"])
+    @pytest.mark.parametrize("mode", ["append", "overwrite"])
+    @pytest.mark.parametrize("target", ["path", "table"])
+    def test_tag_read_option_rejects_writes(self, spark, tag_option, mode, target):
+        spark.sql("CREATE TABLE default.test_table (id INT, name STRING)")
+        spark.sql("INSERT INTO default.test_table VALUES (1, 'tagged')")
+        spark.sql("ALTER TABLE default.test_table CREATE TAG stable")
+        location = _table_location(spark, "default.test_table")
+
+        writer = spark.createDataFrame([(9, "new")], "id INT, name STRING").write \
+            .format("lance").option(tag_option, "stable").mode(mode)
+        with pytest.raises(Exception, match="read-only|Writes are not supported"):
+            if target == "path":
+                writer.save(location)
+            else:
+                writer.saveAsTable("default.test_table")
+        assert [(row.id, row.name) for row in spark.table("default.test_table").collect()] == [
+            (1, "tagged"),
+        ]
+
     @requires_update_or_merge
     def test_version_as_of_after_update(self, spark):
         """Test VERSION AS OF returns data before an update."""
