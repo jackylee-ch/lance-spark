@@ -716,6 +716,11 @@ Until the connector moves to a Lance release that reads these files, it rejects 
 and command that would commit to such a table, except an overwrite or replace, which rewrites
 all of its files; reads, tags, branches and `VACUUM` still work.
 
+Other clients can add such files to any table with v1 blob fields: Lance's fragment writer,
+such as Python's `LanceFragment.create`, writes 2.2 files unless given a version, in Lance 12
+and 13 alike. Have them write at `2.1`, or stop them, before repairing a table, or it will need
+the repair again.
+
 If the table's v1 blob fields are all top-level columns, overwrite it with its own rows at
 `2.1`:
 
