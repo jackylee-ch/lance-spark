@@ -42,7 +42,7 @@ import org.lance.spark.function.LanceMatchFunction;
 import org.lance.spark.function.LanceMultiMatchFunction;
 import org.lance.spark.function.LancePhraseFunction;
 import org.lance.spark.sharding.SparkLanceShardingUtils;
-import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.LanceCommits;
 import org.lance.spark.utils.Optional;
 import org.lance.spark.utils.Utils;
 import org.lance.spark.write.StagedCommit;
@@ -1023,7 +1023,6 @@ public abstract class BaseLanceNamespaceSparkCatalog
     ResolvedTable resolved = resolveIdentifier(ident);
 
     try (Dataset dataset = Utils.openDatasetBuilder(resolved.readOptions).build()) {
-      BlobUtils.checkBlobV1DataFiles(dataset);
       // Dataset.updateConfig uses replace semantics (overwrites entire config),
       // so we must read-merge-write to preserve existing properties.
       Map<String, String> merged = new HashMap<>(dataset.getConfig());
@@ -1704,7 +1703,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
       boolean managedVersioning,
       List<String> tableIdList) {
     if (!managedVersioning) {
-      dataset.updateConfig(config);
+      LanceCommits.run(dataset, () -> dataset.updateConfig(config));
       return;
     }
 
@@ -1720,7 +1719,7 @@ public abstract class BaseLanceNamespaceSparkCatalog
                 .readVersion(dataset.version())
                 .operation(updateConfig)
                 .build();
-        Dataset committed = commitBuilder.execute(txn)) {
+        Dataset committed = LanceCommits.execute(dataset, commitBuilder, txn)) {
       // auto-close txn and committed dataset
     }
   }

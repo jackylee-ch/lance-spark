@@ -52,7 +52,7 @@ import static org.lance.spark.LanceConstant.BLOB_SIZE_SUFFIX;
 
 public abstract class BaseBlobCreateTableTest {
   private SparkSession spark;
-  private static final String catalogName = "lance_ns";
+  protected static final String catalogName = "lance_ns";
 
   @TempDir protected Path tempDir;
 
@@ -888,13 +888,19 @@ public abstract class BaseBlobCreateTableTest {
 
   /**
    * Lance 12 also wrote this table's v1 blob column into a 2.2 file, so a Lance 13 commit would
-   * leave the table unreadable. Every command but an overwrite at 2.1 fails before committing, and
-   * that overwrite repairs the table, blob bytes included.
+   * leave the table unreadable. Every command but an overwrite at 2.1 fails at its commit, and that
+   * overwrite repairs the table, blob bytes included. Tags, branches and VACUUM, which commit no
+   * table version, still run. The table's index leaves the 2.2 fragment out, so REFRESH and
+   * OPTIMIZE INDEX have work to commit.
    */
   @Test
   public void testLance12BlobV1TableOnlyAcceptsAnOverwriteAt21() throws Exception {
     String uri = copyLance12Table("top_level");
     String table = catalogName + ".`" + uri + "`";
+    spark.sql(
+        "CREATE OR REPLACE TEMPORARY VIEW lance12_columns AS "
+            + "SELECT _rowaddr, _fragid, id * 2 AS id2, id + 10 AS id FROM "
+            + table);
     assertRejectedBeforeCommit(
         uri,
         table,
@@ -902,10 +908,19 @@ public abstract class BaseBlobCreateTableTest {
         "INSERT INTO %s VALUES (4, X'666F7572')",
         "DELETE FROM %s WHERE id = 1",
         "ALTER TABLE %s CREATE INDEX data_idx USING btree (id)",
+        "ALTER TABLE %s CREATE INDEX id_zone USING zonemap (id) WITH (train = false)",
+        "ALTER TABLE %s REFRESH INDEX id_idx",
+        "ALTER TABLE %s OPTIMIZE INDEX id_idx",
         "ALTER TABLE %s DROP INDEX id_idx",
-        "OPTIMIZE %s",
-        "ALTER TABLE %s SET TBLPROPERTIES ('note' = 'x')");
+        "ALTER TABLE %s SET TBLPROPERTIES ('note' = 'x')",
+        "ALTER TABLE %s SET UNENFORCED PRIMARY KEY (id)",
+        "ALTER TABLE %s ADD COLUMNS id2 FROM lance12_columns",
+        "ALTER TABLE %s UPDATE COLUMNS id FROM lance12_columns");
+    long version = latestVersion(uri);
     spark.sql("ALTER TABLE " + table + " CREATE TAG before_repair");
+    spark.sql("ALTER TABLE " + table + " CREATE BRANCH repair_backup");
+    spark.sql("VACUUM " + table);
+    assertEquals(version, latestVersion(uri));
 
     spark
         .table(table)
@@ -916,6 +931,7 @@ public abstract class BaseBlobCreateTableTest {
     assertBlobBytes(uri, table, "one", "two", "three", "four");
   }
 
+  /** Without an index on the table, OPTIMIZE has the two fragments to compact and commit. */
   @Test
   public void testLance12NestedBlobV1TableRejectsCommits() throws Exception {
     String uri = copyLance12Table("nested");
@@ -924,7 +940,8 @@ public abstract class BaseBlobCreateTableTest {
         catalogName + ".`" + uri + "`",
         "[payload.data]",
         "INSERT INTO %s VALUES (3, named_struct('data', X'7468726565'))",
-        "ALTER TABLE %s CREATE INDEX id_idx USING btree (id)");
+        "ALTER TABLE %s CREATE INDEX id_idx USING btree (id)",
+        "OPTIMIZE %s");
   }
 
   @Test
@@ -938,6 +955,8 @@ public abstract class BaseBlobCreateTableTest {
     spark.sql("INSERT INTO " + fullName + " VALUES (1, X'6F6E65'), (2, X'74776F')");
     spark.sql("DELETE FROM " + fullName + " WHERE id = 1");
     spark.sql("ALTER TABLE " + fullName + " CREATE INDEX id_idx USING btree (id)");
+    spark.sql("ALTER TABLE " + fullName + " DROP INDEX id_idx");
+    spark.sql("ALTER TABLE " + fullName + " SET TBLPROPERTIES ('note' = 'x')");
     assertEquals(1, spark.table(fullName).collectAsList().size());
     spark.sql("DROP TABLE IF EXISTS " + fullName);
   }
@@ -1258,7 +1277,7 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   /** Copies a table that {@code lance12_blob_v1/datagen.py} wrote and returns its new path. */
-  private String copyLance12Table(String name) throws Exception {
+  protected String copyLance12Table(String name) throws Exception {
     Path source =
         Paths.get(
             BaseBlobCreateTableTest.class
@@ -1275,12 +1294,12 @@ public abstract class BaseBlobCreateTableTest {
   }
 
   /** Runs each statement on {@code table} and checks that it fails before committing. */
-  private void assertRejectedBeforeCommit(
+  protected void assertRejectedBeforeCommit(
       String uri, String table, String fields, String... statements) {
     long version = latestVersion(uri);
     for (String statement : statements) {
       String sql = String.format(statement, table);
-      Exception e = assertThrows(Exception.class, () -> spark.sql(sql));
+      Exception e = assertThrows(Exception.class, () -> spark.sql(sql), sql);
       assertTrue(causedByMessage(e, fields), sql + " failed for another reason: " + e);
     }
     assertEquals(version, latestVersion(uri));

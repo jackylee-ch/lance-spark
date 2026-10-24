@@ -30,7 +30,7 @@ import org.lance.spark.LanceSparkWriteOptions;
 import org.lance.spark.function.LanceFragmentIdWithDefaultFunction;
 import org.lance.spark.utils.BlobReferenceResolver;
 import org.lance.spark.utils.BlobSourceContext;
-import org.lance.spark.utils.BlobUtils;
+import org.lance.spark.utils.LanceCommits;
 import org.lance.spark.utils.Utils;
 
 import com.google.common.collect.ImmutableList;
@@ -197,9 +197,6 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
                           return existing;
                         }));
       }
-      // The rows UPDATE and MERGE rewrite land in new fragments; check them as LanceBatchWrite
-      // does.
-      BlobUtils.checkBlobV1Fragments(sparkSchema, newFragments);
 
       long version =
           Objects.requireNonNull(
@@ -254,7 +251,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
         }
         try (Transaction txn =
                 new Transaction.Builder().readVersion(version).operation(update).build();
-            Dataset committed = commitBuilder.execute(txn)) {
+            Dataset committed = LanceCommits.execute(dataset, commitBuilder, txn)) {
           // auto-close txn and committed dataset
         }
       }

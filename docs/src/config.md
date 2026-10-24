@@ -712,9 +712,12 @@ newer, `stable` or `next` is rejected for a table with v1 blob fields, top-level
 Earlier connector releases, on Lance 12, accepted such writes and kept the fields v1, but
 stored the new data files at the requested version. With Lance 13, any commit to a table that
 holds such a file turns its v1 blob fields into blob v2 and leaves the new version unreadable.
-Until the connector moves to a Lance release that reads these files, it rejects every write
-and command that would commit to such a table, except an overwrite or replace, which rewrites
-all of its files; reads, tags, branches and `VACUUM` still work.
+Until the connector moves to a Lance release that reads these files, every connector commit
+checks the files the new version would reference and fails, without committing, if one of them
+is such a file. That rejects every write and command on such a table except an overwrite or
+replace, which drops all of its files; reads, tags, branches and `VACUUM` commit no table
+version and still work. A write or command rejected this way may already have written files;
+no version references them, and `VACUUM` removes them once they are 7 days old.
 
 Other clients can add such files to any table with v1 blob fields: Lance's fragment writer,
 such as Python's `LanceFragment.create`, writes 2.2 files unless given a version, in Lance 12

@@ -13,9 +13,15 @@
  */
 package org.lance.spark.utils;
 
+import org.lance.Dataset;
 import org.lance.FragmentMetadata;
+import org.lance.WriteParams;
 import org.lance.fragment.DataFile;
+import org.lance.operation.Merge;
+import org.lance.operation.Overwrite;
 
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
 import org.apache.spark.sql.catalyst.expressions.GenericInternalRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.Metadata;
@@ -25,7 +31,9 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.LanceArrowUtils;
 import org.apache.spark.unsafe.types.UTF8String;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -256,18 +264,57 @@ public class BlobUtilsTest {
             blobV1Fields, Arrays.asList(dataFile(2, 2, 0, 1), dataFile(3, 0, 3))));
   }
 
+  /** The dataset is not read: an overwrite keeps none of the table's files. */
   @Test
-  public void checkBlobV1FragmentsRejectsV1FieldsWrittenAtTwoTwo() {
-    StructType v1 =
-        new StructType(new StructField[] {field("id", DataTypes.IntegerType), blobV1Field()});
+  public void checkBlobV1CommitChecksAnOverwriteOnItsOwnFiles() {
+    StructType nestedV1 =
+        new StructType()
+            .add("id", DataTypes.IntegerType)
+            .add("payload", new StructType(new StructField[] {blobV1Field("data")}));
     IllegalArgumentException e =
         assertThrows(
             IllegalArgumentException.class,
-            () -> BlobUtils.checkBlobV1Fragments(v1, fragments(dataFile(2, 2, 0, 1))));
-    assertTrue(e.getMessage().contains("[payload]"), e.getMessage());
-    BlobUtils.checkBlobV1Fragments(v1, fragments(dataFile(2, 1, 0, 1)));
-    BlobUtils.checkBlobV1Fragments(
-        new StructType(new StructField[] {blobV2Field()}), fragments(dataFile(2, 2, 0)));
+            () -> BlobUtils.checkBlobV1Commit(null, overwrite(nestedV1, dataFile(2, 2, 0, 1, 2))));
+    assertTrue(e.getMessage().contains("[payload.data]"), e.getMessage());
+    BlobUtils.checkBlobV1Commit(null, overwrite(nestedV1, dataFile(2, 1, 0, 1, 2)));
+    BlobUtils.checkBlobV1Commit(
+        null, overwrite(new StructType(new StructField[] {blobV2Field()}), dataFile(2, 2, 0)));
+  }
+
+  private static Overwrite overwrite(StructType schema, DataFile file) {
+    return Overwrite.builder()
+        .fragments(fragments(file))
+        .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true))
+        .build();
+  }
+
+  /** A column that a merge adds gets its id when the merge commits, so it is matched by path. */
+  @Test
+  public void checkBlobV1CommitRejectsAMergeAddingV1FieldsAtTwoTwo(@TempDir Path dir) {
+    StructType table = new StructType().add("id", DataTypes.IntegerType);
+    StructType merged = table.add(blobV1Field("data"));
+    WriteParams params = new WriteParams.Builder().withDataStorageVersion("2.2").build();
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE);
+        Dataset dataset =
+            Dataset.create(
+                allocator,
+                dir.resolve("merge.lance").toString(),
+                LanceArrowUtils.toArrowSchema(table, "UTC", true),
+                params)) {
+      IllegalArgumentException e =
+          assertThrows(
+              IllegalArgumentException.class,
+              () -> BlobUtils.checkBlobV1Commit(dataset, merge(merged, dataFile(2, 2, 0, 1))));
+      assertTrue(e.getMessage().contains("[data]"), e.getMessage());
+      BlobUtils.checkBlobV1Commit(dataset, merge(merged, dataFile(2, 1, 0, 1)));
+    }
+  }
+
+  private static Merge merge(StructType schema, DataFile file) {
+    return Merge.builder()
+        .fragments(fragments(file))
+        .schema(LanceArrowUtils.toArrowSchema(schema, "UTC", true))
+        .build();
   }
 
   private static DataFile dataFile(int major, int minor, int... fields) {

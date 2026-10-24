@@ -22,17 +22,22 @@ assert lance.__version__ == EXPECTED_LANCE_VERSION
 BLOB_V1 = {"lance-encoding:blob": "true"}
 
 
-def write(name, schema, rows, appended_rows):
+def write(name, schema, rows, appended_rows, index=None):
     path = Path(__file__).parent / name
     shutil.rmtree(path, ignore_errors=True)
-    lance.write_dataset(
+    dataset = lance.write_dataset(
         pa.Table.from_pylist(rows, schema), path, data_storage_version="2.1"
     )
+    if index is not None:
+        # Indexed before the append, so REFRESH INDEX has the 2.2 fragment left to cover.
+        dataset.create_scalar_index(index, "BTREE", name=index + "_idx")
     fragment = LanceFragment.create(
         path, pa.Table.from_pylist(appended_rows, schema), data_storage_version="2.2"
     )
-    return lance.LanceDataset.commit(
-        path, lance.LanceOperation.Append([fragment]), read_version=1
+    lance.LanceDataset.commit(
+        path,
+        lance.LanceOperation.Append([fragment]),
+        read_version=lance.dataset(path).version,
     )
 
 
@@ -47,7 +52,8 @@ write(
     top_level,
     [{"id": 1, "data": b"one"}, {"id": 2, "data": b"two"}],
     [{"id": 3, "data": b"three"}],
-).create_scalar_index("id", "BTREE", name="id_idx")
+    index="id",
+)
 
 nested = pa.schema(
     [

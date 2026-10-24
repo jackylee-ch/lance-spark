@@ -17,8 +17,15 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.fragment.DataFile;
+import org.lance.operation.Append;
+import org.lance.operation.Merge;
+import org.lance.operation.Operation;
+import org.lance.operation.Overwrite;
+import org.lance.operation.Update;
 import org.lance.schema.LanceField;
 
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.types.ArrayType;
 import org.apache.spark.sql.types.DataType;
@@ -32,6 +39,7 @@ import org.apache.spark.unsafe.types.UTF8String;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -320,23 +328,58 @@ public class BlobUtils {
   }
 
   /**
-   * Rejects a commit to {@code dataset} while data files at file format {@value
-   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer hold its legacy (v1) blob fields, as Lance 12 wrote
-   * them. Lance 13 turns such a field into blob v2 on any commit, while the files keep the v1
-   * layout, so the committed version cannot be read. Remove once the connector uses a Lance release
-   * that reads that layout.
+   * Rejects committing {@code operation} on {@code dataset} when the new version would reference a
+   * data file at file format {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer that holds a legacy
+   * (v1) blob field. Lance 13 turns such a field into blob v2 on that commit, while files that
+   * Lance 12 or a fragment writer wrote keep the v1 layout, so the new version cannot be read. An
+   * overwrite only references the fragments it commits; any other operation also keeps the files of
+   * {@code dataset}. {@link LanceCommits} runs this before each connector commit. Remove once the
+   * connector uses a Lance release that reads that layout.
+   *
+   * @param dataset the version {@code operation} is committed on; unused for an overwrite
    */
-  public static void checkBlobV1DataFiles(Dataset dataset) {
+  static void checkBlobV1Commit(Dataset dataset, Operation operation) {
+    if (operation instanceof Overwrite) {
+      Overwrite overwrite = (Overwrite) operation;
+      checkAddedBlobV1Fields(
+          arrowBlobV1Fields(overwrite.schema()), overwrite.fragments(), Collections.emptySet());
+      return;
+    }
+    checkBlobV1DataFiles(dataset, addedFragments(operation));
+    if (operation instanceof Merge) {
+      // A merge can add columns, such as ADD COLUMNS does, and Lance takes the new schema from it.
+      Merge merge = (Merge) operation;
+      Set<String> added = arrowBlobV1Fields(merge.schema());
+      Map<Integer, String> existing = new HashMap<>();
+      collectBlobV1Fields("", dataset.getLanceSchema().fields(), existing);
+      added.removeAll(existing.values());
+      if (!added.isEmpty()) {
+        checkAddedBlobV1Fields(added, merge.fragments(), dataFilePaths(dataset));
+      }
+    }
+  }
+
+  /**
+   * Like {@link #checkBlobV1Commit}, for a Lance call that commits on {@code dataset}, such as
+   * {@code createIndex}. The data files such a call writes itself, as compaction does, come from
+   * Lance's dataset writer, which stores v1 blob fields as blob v2 from 2.2 on, so only the files
+   * kept from {@code dataset} are checked.
+   */
+  static void checkBlobV1DataFiles(Dataset dataset) {
+    checkBlobV1DataFiles(dataset, Collections.emptyList());
+  }
+
+  private static void checkBlobV1DataFiles(Dataset dataset, List<FragmentMetadata> added) {
     Map<Integer, String> blobV1Fields = new HashMap<>();
     collectBlobV1Fields("", dataset.getLanceSchema().fields(), blobV1Fields);
     if (blobV1Fields.isEmpty()) {
       return;
     }
-    List<DataFile> files = new ArrayList<>();
+    List<DataFile> kept = new ArrayList<>();
     for (Fragment fragment : dataset.getFragments()) {
-      files.addAll(fragment.metadata().getReferencedLanceFiles());
+      kept.addAll(fragment.metadata().getReferencedLanceFiles());
     }
-    Set<String> held = blobV1FieldsInBlobV2Files(blobV1Fields, files);
+    Set<String> held = blobV1FieldsInBlobV2Files(blobV1Fields, kept);
     if (!held.isEmpty()) {
       throw new UnsupportedOperationException(
           "Data files at file format "
@@ -346,6 +389,31 @@ public class BlobUtils {
               + ", so a commit would turn them into blob v2 and leave the table unreadable."
               + " Repair the table first; see Blob v2 Writes in the configuration docs.");
     }
+    List<DataFile> written = new ArrayList<>();
+    for (FragmentMetadata fragment : added) {
+      written.addAll(fragment.getReferencedLanceFiles());
+    }
+    Set<String> writtenFields = blobV1FieldsInBlobV2Files(blobV1Fields, written);
+    if (!writtenFields.isEmpty()) {
+      throw writtenAtBlobV2Version(writtenFields);
+    }
+  }
+
+  /** Fragments {@code operation} commits with new or rewritten data files. */
+  private static List<FragmentMetadata> addedFragments(Operation operation) {
+    if (operation instanceof Append) {
+      return ((Append) operation).fragments();
+    }
+    if (operation instanceof Merge) {
+      return ((Merge) operation).fragments();
+    }
+    if (operation instanceof Update) {
+      Update update = (Update) operation;
+      List<FragmentMetadata> fragments = new ArrayList<>(update.updatedFragments());
+      fragments.addAll(update.newFragments());
+      return fragments;
+    }
+    return Collections.emptyList();
   }
 
   /** Paths of {@code blobV1Fields}, keyed by field id, that a 2.2+ file in {@code files} holds. */
@@ -366,32 +434,51 @@ public class BlobUtils {
   }
 
   /**
-   * Rejects {@code fragments} that store legacy (v1) blob fields of {@code schema} in data files at
-   * file format {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer, which the commit would turn
-   * into blob v2 and leave unreadable. Every fragment of a write holds all of {@code schema}'s
-   * columns, so any such file holds them.
+   * Rejects writing {@code fields}, legacy (v1) blob fields that get their ids only when the
+   * overwrite or merge adding them commits, into a data file at file format {@value
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer. Without ids they are matched by path: every data
+   * file a write adds holds all of the columns it writes, so any such file of {@code fragments}
+   * outside {@code kept} holds them.
    */
-  public static void checkBlobV1Fragments(StructType schema, List<FragmentMetadata> fragments) {
-    Set<String> blobV1Fields = blobV1ColumnNames(schema);
-    if (blobV1Fields.isEmpty()) {
+  private static void checkAddedBlobV1Fields(
+      Set<String> fields, List<FragmentMetadata> fragments, Set<String> kept) {
+    if (fields.isEmpty()) {
       return;
     }
     for (FragmentMetadata fragment : fragments) {
       for (DataFile file : fragment.getReferencedLanceFiles()) {
-        if (isBlobV2FileFormat(file)) {
-          throw new IllegalArgumentException(
-              "Legacy (v1) blob columns "
-                  + blobV1Fields
-                  + " were written at file format "
-                  + file.getFileMajorVersion()
-                  + "."
-                  + file.getFileMinorVersion()
-                  + ", which cannot store them. Write with file_format_version "
-                  + MAX_BLOB_V1_FILE_FORMAT_VERSION
-                  + " or older.");
+        if (isBlobV2FileFormat(file) && !kept.contains(file.getPath())) {
+          throw writtenAtBlobV2Version(fields);
         }
       }
     }
+  }
+
+  private static Set<String> arrowBlobV1Fields(Schema schema) {
+    Set<String> paths = new TreeSet<>();
+    collectArrowBlobV1Fields("", schema.getFields(), paths);
+    return paths;
+  }
+
+  private static Set<String> dataFilePaths(Dataset dataset) {
+    Set<String> paths = new HashSet<>();
+    for (Fragment fragment : dataset.getFragments()) {
+      for (DataFile file : fragment.metadata().getReferencedLanceFiles()) {
+        paths.add(file.getPath());
+      }
+    }
+    return paths;
+  }
+
+  private static IllegalArgumentException writtenAtBlobV2Version(Set<String> blobV1Fields) {
+    return new IllegalArgumentException(
+        "Legacy (v1) blob columns "
+            + blobV1Fields
+            + " were written at file format "
+            + MIN_BLOB_V2_FILE_FORMAT_VERSION
+            + " or newer, which cannot store them. Write with file_format_version "
+            + MAX_BLOB_V1_FILE_FORMAT_VERSION
+            + " or older.");
   }
 
   private static boolean isBlobV2FileFormat(DataFile file) {
@@ -401,18 +488,32 @@ public class BlobUtils {
 
   // Lance's legacy blob test: the blob key without blob v2. Blob v2 fields are structs in both of
   // their schema forms, so a legacy blob is a leaf that carries the key.
+  private static boolean isLegacyBlob(Map<String, String> metadata, boolean leaf) {
+    return leaf
+        && metadata != null
+        && metadata.containsKey(LANCE_ENCODING_BLOB_KEY)
+        && !ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY));
+  }
+
   private static void collectBlobV1Fields(
       String parent, List<LanceField> fields, Map<Integer, String> blobV1Fields) {
     for (LanceField field : fields) {
       String path = parent.isEmpty() ? field.getName() : parent + "." + field.getName();
-      Map<String, String> metadata = field.getMetadata();
-      if (metadata != null
-          && metadata.containsKey(LANCE_ENCODING_BLOB_KEY)
-          && !ARROW_EXTENSION_BLOB_V2.equals(metadata.get(ARROW_EXTENSION_NAME_KEY))
-          && field.getChildren().isEmpty()) {
+      if (isLegacyBlob(field.getMetadata(), field.getChildren().isEmpty())) {
         blobV1Fields.put(field.getId(), path);
       }
       collectBlobV1Fields(path, field.getChildren(), blobV1Fields);
+    }
+  }
+
+  private static void collectArrowBlobV1Fields(
+      String parent, List<Field> fields, Set<String> paths) {
+    for (Field field : fields) {
+      String path = parent.isEmpty() ? field.getName() : parent + "." + field.getName();
+      if (isLegacyBlob(field.getMetadata(), field.getChildren().isEmpty())) {
+        paths.add(path);
+      }
+      collectArrowBlobV1Fields(path, field.getChildren(), paths);
     }
   }
 
