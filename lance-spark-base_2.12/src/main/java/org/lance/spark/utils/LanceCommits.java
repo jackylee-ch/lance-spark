@@ -18,8 +18,6 @@ import org.lance.Dataset;
 import org.lance.Transaction;
 import org.lance.operation.Overwrite;
 
-import com.google.common.base.Preconditions;
-
 import java.util.function.Supplier;
 
 /**
@@ -44,10 +42,10 @@ public final class LanceCommits {
    * builder}. The overwrite keeps none of the table's data files, so no dataset is needed.
    */
   public static Dataset replace(CommitBuilder builder, Transaction transaction) {
-    Preconditions.checkArgument(
-        transaction.operation() instanceof Overwrite,
-        "Expected an overwrite, got %s",
-        transaction.operation().name());
+    if (!(transaction.operation() instanceof Overwrite)) {
+      throw new IllegalArgumentException(
+          "Expected an overwrite, got " + transaction.operation().name());
+    }
     BlobUtils.checkBlobV1Commit(null, transaction.operation());
     return builder.execute(transaction);
   }
