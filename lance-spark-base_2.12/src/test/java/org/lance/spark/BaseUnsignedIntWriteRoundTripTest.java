@@ -40,6 +40,7 @@ import org.apache.spark.sql.types.StructType;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.ByteArrayInputStream;
@@ -52,7 +53,6 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /** Spark cannot create unsigned columns, so these tests create their tables with the Lance API. */
 public abstract class BaseUnsignedIntWriteRoundTripTest {
@@ -84,7 +84,7 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     }
   }
 
-  private static Field unsignedField(String name, int bitWidth) {
+  protected static Field unsignedField(String name, int bitWidth) {
     return new Field(
         name, new FieldType(true, new ArrowType.Int(bitWidth, false), null, null), null);
   }
@@ -116,28 +116,32 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
       u32.setSafe(0, (int) 4294967295L);
       u64.setSafe(0, 9000000000L);
       root.setRowCount(1);
-
-      ByteArrayOutputStream baos = new ByteArrayOutputStream();
-      try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, baos)) {
-        writer.start();
-        writer.writeBatch();
-        writer.end();
-      }
-
-      try (ArrowStreamReader reader =
-              new ArrowStreamReader(new ByteArrayInputStream(baos.toByteArray()), allocator);
-          ArrowArrayStream arrowStream = ArrowArrayStream.allocateNew(allocator)) {
-        Data.exportArrayStream(allocator, reader, arrowStream);
-        Dataset.write().stream(arrowStream).uri(datasetUri).execute().close();
-      }
+      writeDataset(datasetUri, root);
     }
   }
 
-  private static Dataset open(String datasetUri) {
+  /** Writes {@code root} to a new Lance dataset through the Arrow C Data interface. */
+  protected static void writeDataset(String datasetUri, VectorSchemaRoot root) throws Exception {
+    BufferAllocator allocator = LanceRuntime.allocator();
+    ByteArrayOutputStream baos = new ByteArrayOutputStream();
+    try (ArrowStreamWriter writer = new ArrowStreamWriter(root, null, baos)) {
+      writer.start();
+      writer.writeBatch();
+      writer.end();
+    }
+    try (ArrowStreamReader reader =
+            new ArrowStreamReader(new ByteArrayInputStream(baos.toByteArray()), allocator);
+        ArrowArrayStream arrowStream = ArrowArrayStream.allocateNew(allocator)) {
+      Data.exportArrayStream(allocator, reader, arrowStream);
+      Dataset.write().stream(arrowStream).uri(datasetUri).execute().close();
+    }
+  }
+
+  protected static Dataset open(String datasetUri) {
     return Dataset.open().allocator(LanceRuntime.allocator()).uri(datasetUri).build();
   }
 
-  private static void assertIntType(Schema schema, String name, int width, boolean signed) {
+  protected static void assertIntType(Schema schema, String name, int width, boolean signed) {
     Field field = schema.findField(name);
     assertEquals(new ArrowType.Int(width, signed), field.getType(), name);
     assertTrue(field.getMetadata().isEmpty(), name + " metadata " + field.getMetadata());
@@ -255,6 +259,31 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
             .selectExpr("u8")
             .first()
             .getShort(0));
+  }
+
+  @Test
+  public void testAddColumnsKeepsUnsignedTypes() throws Exception {
+    String datasetUri = tempDir.resolve("uint_add_columns.lance").toString();
+    createUnsignedDataset(datasetUri);
+    String table = "lance.`" + datasetUri + "`";
+
+    spark
+        .sql("SELECT _rowaddr, _fragid, id * 10 AS extra FROM " + table)
+        .createOrReplaceTempView("uint_add_source");
+    spark.sql("ALTER TABLE " + table + " ADD COLUMNS extra FROM uint_add_source");
+
+    assertUnsignedColumns(datasetUri);
+    try (Dataset dataset = open(datasetUri)) {
+      assertIntType(dataset.getSchema(), "extra", 32, true);
+    }
+    assertEquals(
+        RowFactory.create(1, (short) 255, 65535, 4294967295L, 9000000000L, 10),
+        spark
+            .read()
+            .format(LanceDataSource.name)
+            .load(datasetUri)
+            .selectExpr("id", "u8", "u16", "u32", "u64", "extra")
+            .first());
   }
 
   @Test
@@ -424,44 +453,54 @@ public abstract class BaseUnsignedIntWriteRoundTripTest {
     createUnsignedDataset(datasetUri);
     StructType schema = spark.read().format(LanceDataSource.name).load(datasetUri).schema();
 
-    assertAppendRejected(
-        schema, datasetUri, RowFactory.create(2, (short) 256, 0, 0L, 0L), "[0, 255], got 256");
-    assertAppendRejected(
-        schema,
+    Object[][] appends = {
+      {RowFactory.create(2, (short) 256, 0, 0L, 0L), "[0, 255], got 256"},
+      {RowFactory.create(2, (short) 0, 65536, 0L, 0L), "[0, 65535], got 65536"},
+      {RowFactory.create(2, (short) 0, 0, 4294967296L, 0L), "[0, 4294967295], got 4294967296"},
+      {RowFactory.create(2, (short) -1, 0, 0L, 0L), "[0, 255], got -1"}
+    };
+    for (Object[] append : appends) {
+      assertWriteRejected(
+          datasetUri,
+          () ->
+              spark
+                  .createDataFrame(Collections.singletonList((Row) append[0]), schema)
+                  .write()
+                  .format(LanceDataSource.name)
+                  .mode(SaveMode.Append)
+                  .save(datasetUri),
+          (String) append[1]);
+    }
+    assertWriteRejected(
         datasetUri,
-        RowFactory.create(2, (short) 0, 65536, 0L, 0L),
-        "[0, 65535], got 65536");
-    assertAppendRejected(
-        schema,
-        datasetUri,
-        RowFactory.create(2, (short) 0, 0, 4294967296L, 0L),
-        "[0, 4294967295], got 4294967296");
-    assertAppendRejected(
-        schema, datasetUri, RowFactory.create(2, (short) -1, 0, 0L, 0L), "[0, 255], got -1");
-
-    assertEquals(
-        1L,
-        spark.read().format(LanceDataSource.name).load(datasetUri).count(),
-        "a rejected append must not add rows");
+        () -> spark.sql("INSERT OVERWRITE lance.`" + datasetUri + "` VALUES (2, 300, 0, 0, 0)"),
+        "[0, 255], got 300");
   }
 
-  private void assertAppendRejected(
-      StructType schema, String datasetUri, Row row, String expected) {
-    Exception e =
-        assertThrows(
-            Exception.class,
-            () ->
-                spark
-                    .createDataFrame(Collections.singletonList(row), schema)
-                    .write()
-                    .format(LanceDataSource.name)
-                    .mode(SaveMode.Append)
-                    .save(datasetUri));
-    for (Throwable t = e; t != null; t = t.getCause()) {
-      if (t.getMessage() != null && t.getMessage().contains(expected)) {
-        return;
-      }
+  /** Asserts that {@code write} fails with {@code expected} and leaves the table as it was. */
+  private void assertWriteRejected(String datasetUri, Executable write, String expected) {
+    long version;
+    Schema schema;
+    try (Dataset dataset = open(datasetUri)) {
+      version = dataset.version();
+      schema = dataset.getSchema();
     }
-    fail("expected \"" + expected + "\" in the failure chain", e);
+    List<Row> rows =
+        spark.read().format(LanceDataSource.name).load(datasetUri).orderBy("id").collectAsList();
+
+    Exception e = assertThrows(Exception.class, write);
+    boolean found = false;
+    for (Throwable t = e; t != null && !found; t = t.getCause()) {
+      found = t.getMessage() != null && t.getMessage().contains(expected);
+    }
+    assertTrue(found, "expected \"" + expected + "\" in the failure chain of " + e);
+
+    try (Dataset dataset = open(datasetUri)) {
+      assertEquals(version, dataset.version());
+      assertEquals(schema, dataset.getSchema());
+    }
+    assertEquals(
+        rows,
+        spark.read().format(LanceDataSource.name).load(datasetUri).orderBy("id").collectAsList());
   }
 }
