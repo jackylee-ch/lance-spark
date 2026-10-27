@@ -744,14 +744,14 @@ public class SchemaConverterTest {
     assertEquals(new ArrowType.Int(64, true), newTable.findField("u32").getType());
     assertEquals(new ArrowType.Int(64, true), newTable.findField("u64").getType());
 
-    StructType write = LanceArrowUtils.withUnsignedIntTypes(read, destination);
+    StructType write = LanceArrowUtils.markUnsignedForWrite(read, destination);
     assertEquals(destination, LanceArrowUtils.toArrowSchema(write, "UTC", true));
 
     StructType widened =
         new StructType().add("u8", DataTypes.IntegerType).add("u16", DataTypes.LongType);
     Schema widenedWrite =
         LanceArrowUtils.toArrowSchema(
-            LanceArrowUtils.withUnsignedIntTypes(widened, destination), "UTC", true);
+            LanceArrowUtils.markUnsignedForWrite(widened, destination), "UTC", true);
     assertEquals(new ArrowType.Int(32, true), widenedWrite.findField("u8").getType());
     assertEquals(new ArrowType.Int(64, true), widenedWrite.findField("u16").getType());
   }

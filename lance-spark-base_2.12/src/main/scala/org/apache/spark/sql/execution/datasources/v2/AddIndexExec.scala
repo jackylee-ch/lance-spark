@@ -352,7 +352,7 @@ class RangeBasedBTreeIndexJob(
     val rangeDf = selectDf
       .repartitionByRange(numPartitions, selectDf.col(fragmentColumn))
       .sortWithinPartitions(sortKey.asc)
-    val streamSchema = LanceArrowUtils.withUnsignedIntTypes(
+    val streamSchema = LanceArrowUtils.markUnsignedForWrite(
       rangeDf.schema,
       new Schema(Collections.singletonList(storedValue)))
 

@@ -313,10 +313,7 @@ private[arrow] class UnsignedLongWriter(val valueVector: UInt8Vector)
   }
 }
 
-// fromArrowField widened uint8/16/32 to Short/Int/Long, which can hold values outside the
-// unsigned range. setSafe would keep only the low bits (uint8: 256 -> 0, -1 -> 255) and Lance
-// would accept the result, so out-of-range values are rejected. uint64 needs no check: its
-// vector is as wide as Spark's Long.
+// Reject out of range values before Arrow silently truncates them.
 private[arrow] class UnsignedByteWriter(val valueVector: UInt1Vector)
   extends LanceArrowFieldWriter {
   override def setNull(): Unit = {}

@@ -112,7 +112,7 @@ public class SparkPositionDeltaWrite implements DeltaWrite, RequiresDistribution
       List<String> tableId,
       Map<String, BlobSourceContext> blobSourceContexts) {
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.sparkSchema = LanceArrowUtils.withUnsignedIntTypes(sparkSchema, ds.getSchema());
+      this.sparkSchema = LanceArrowUtils.markUnsignedForWrite(sparkSchema, ds.getSchema());
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       this.hasStableRowIds = hasStableRowIds(ds, writeOptions);
       LOG.debug(

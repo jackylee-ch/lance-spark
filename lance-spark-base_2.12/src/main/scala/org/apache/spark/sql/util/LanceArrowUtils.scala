@@ -58,7 +58,7 @@ object LanceArrowUtils {
 
   // Spark has no unsigned integer types, so reads widen UInt8/16/32/64 to Short/Int/Long/Long.
   // Writes into an existing table set this key from the table's Lance schema (see
-  // withUnsignedIntTypes) so toArrowField writes those columns back with their unsigned type.
+  // markUnsignedForWrite) so toArrowField writes those columns back with their unsigned type.
   val LANCE_UNSIGNED_INT_BIT_WIDTH_KEY = "_lance.unsigned_int_bit_width"
 
   // Namespaced keys used to embed child Spark Metadata on a parent StructField when the
@@ -345,7 +345,7 @@ object LanceArrowUtils {
    * name, including struct fields, list elements and map keys and values. A column is marked only
    * if its Spark type is the one fromArrowSchema reads that unsigned width as.
    */
-  def withUnsignedIntTypes(schema: StructType, destination: Schema): StructType =
+  def markUnsignedForWrite(schema: StructType, destination: Schema): StructType =
     markUnsignedFields(schema, destination.getFields.asScala)
 
   private def markUnsignedFields(schema: StructType, destination: Iterable[Field]): StructType = {
@@ -354,7 +354,7 @@ object LanceArrowUtils {
       destinationByName.get(field.name) match {
         case Some(destinationField) =>
           val (dataType, metadata) =
-            withUnsignedIntType(field.dataType, field.metadata, destinationField)
+            markUnsigned(field.dataType, field.metadata, destinationField)
           field.copy(dataType = dataType, metadata = metadata)
         case None => field
       }
@@ -363,7 +363,7 @@ object LanceArrowUtils {
 
   // Returns the data type with nested struct fields marked, and the metadata of this position,
   // which for a list element or map key or value is embedded in its parent's metadata.
-  private def withUnsignedIntType(
+  private def markUnsigned(
       dt: DataType,
       metadata: Metadata,
       destination: Field): (DataType, Metadata) = (dt, destination.getType) match {
@@ -379,7 +379,7 @@ object LanceArrowUtils {
           ArrayType(elementType, containsNull),
           _: ArrowType.List | _: ArrowType.LargeList |
           _: ArrowType.FixedSizeList) =>
-      val (element, elementMetadata) = withUnsignedIntType(
+      val (element, elementMetadata) = markUnsigned(
         elementType,
         parseEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY),
         destination.getChildren.get(0))
@@ -388,11 +388,11 @@ object LanceArrowUtils {
         withEmbeddedMetadata(metadata, LANCE_ELEMENT_METADATA_KEY, elementMetadata))
     case (MapType(keyType, valueType, valueContainsNull), _: ArrowType.Map) =>
       val entries = destination.getChildren.get(0).getChildren
-      val (key, keyMetadata) = withUnsignedIntType(
+      val (key, keyMetadata) = markUnsigned(
         keyType,
         parseEmbeddedMetadata(metadata, LANCE_MAP_KEY_METADATA_KEY),
         entries.get(0))
-      val (value, valueMetadata) = withUnsignedIntType(
+      val (value, valueMetadata) = markUnsigned(
         valueType,
         parseEmbeddedMetadata(metadata, LANCE_MAP_VALUE_METADATA_KEY),
         entries.get(1))

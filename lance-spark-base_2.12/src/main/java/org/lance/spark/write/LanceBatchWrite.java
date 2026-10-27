@@ -132,7 +132,7 @@ public class LanceBatchWrite implements BatchWrite {
       this.writeOptions = writeOptions;
     } else {
       try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-        this.schema = LanceArrowUtils.withUnsignedIntTypes(schema, ds.getSchema());
+        this.schema = LanceArrowUtils.markUnsignedForWrite(schema, ds.getSchema());
         this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
         logger.debug("Resolved dataset ref for batch write: {}", this.writeOptions.getRef());
       }

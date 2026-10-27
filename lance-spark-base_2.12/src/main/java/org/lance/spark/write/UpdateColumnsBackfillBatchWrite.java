@@ -88,7 +88,7 @@ public class UpdateColumnsBackfillBatchWrite implements BatchWrite {
       List<String> tableId,
       boolean managedVersioning) {
     try (Dataset ds = Utils.openDatasetBuilder(writeOptions).build()) {
-      this.schema = LanceArrowUtils.withUnsignedIntTypes(schema, ds.getSchema());
+      this.schema = LanceArrowUtils.markUnsignedForWrite(schema, ds.getSchema());
       this.writeOptions = writeOptions.withRef(LanceRef.ofMain(ds.version()));
       logger.debug("Resolved dataset ref for UPDATE COLUMNS: {}", this.writeOptions.getRef());
     }
