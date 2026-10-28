@@ -18,6 +18,7 @@ import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.WriteParams;
 import org.lance.WriteParams.WriteMode;
+import org.lance.fragment.DataFile;
 import org.lance.schema.LanceField;
 import org.lance.spark.LanceRuntime;
 import org.lance.spark.LanceSparkWriteOptions;
@@ -56,6 +57,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -487,6 +489,122 @@ public class LanceBatchWriteTest {
     }
   }
 
+  /**
+   * The spec carries the Lance write parameters the commit expects: the write mode from {@code
+   * isOverwrite()}, resolved options, and storage options vended by a namespace. It survives
+   * serialization.
+   */
+  @Test
+  public void testFragmentWriteSpecCarriesResolvedOptions(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
+      Dataset.create(allocator, datasetUri, schema, new WriteParams.Builder().build()).close();
+      StructType sparkSchema = LanceArrowUtils.fromArrowSchema(schema);
+      Map<String, String> options = new HashMap<>();
+      options.put(LanceSparkWriteOptions.CONFIG_FILE_FORMAT_VERSION, "2.1");
+      options.put(LanceSparkWriteOptions.CONFIG_MAX_ROWS_PER_FILE, "10");
+      options.put(LanceSparkWriteOptions.CONFIG_ENABLE_STABLE_ROW_IDS, "true");
+      // write_mode=create still gives APPEND: the spec takes the write mode from isOverwrite().
+      options.put(LanceSparkWriteOptions.CONFIG_WRITE_MODE, "create");
+      LanceSparkWriteOptions writeOptions = LanceSparkWriteOptions.from(options, datasetUri);
+      Map<String, String> vended = new HashMap<>();
+      vended.put("access_key_id", "from-namespace");
+
+      FragmentWriteSpec appendSpec =
+          new LanceBatchWrite(
+                  sparkSchema, writeOptions, false, vended, null, null, null, false, null)
+              .getFragmentWriteSpec();
+      // The spec keeps its own copy of the vended options.
+      vended.put("access_key_id", "changed");
+      FragmentWriteSpec shipped = TestUtils.roundTrip(appendSpec);
+      WriteParams params = shipped.toWriteParams();
+      assertEquals(datasetUri, shipped.getDatasetUri());
+      assertEquals(Optional.of("APPEND"), params.getMode());
+      assertEquals(Optional.of("2.1"), params.getDataStorageVersion());
+      assertEquals(Optional.of(10), params.getMaxRowsPerFile());
+      // Stable row ids are assigned at commit, as for the row writer's fragments.
+      assertEquals(Optional.of(false), params.getEnableStableRowIds());
+      assertEquals("from-namespace", params.getStorageOptions().get("access_key_id"));
+
+      FragmentWriteSpec overwriteSpec =
+          new LanceBatchWrite(
+                  sparkSchema, writeOptions, true, vended, null, null, null, false, null)
+              .getFragmentWriteSpec();
+      assertEquals(Optional.of("OVERWRITE"), overwriteSpec.toWriteParams().getMode());
+    }
+  }
+
+  /** Fragments written with the spec keep a table's pinned file format version, not the default. */
+  @Test
+  public void testFragmentWriteSpecKeepsPinnedFileFormatVersion(TestInfo testInfo)
+      throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
+      Dataset.create(
+              allocator,
+              datasetUri,
+              schema,
+              new WriteParams.Builder().withDataStorageVersion("2.1").build())
+          .close();
+      // LanceDataset merges the table's file_format_version into the write options.
+      LanceSparkWriteOptions writeOptions =
+          LanceSparkWriteOptions.builder()
+              .datasetUri(datasetUri)
+              .fileFormatVersion("2.1")
+              .maxRowsPerFile(10)
+              .build();
+      LanceBatchWrite batchWrite =
+          newBatchWrite(LanceArrowUtils.fromArrowSchema(schema), writeOptions, false, null);
+
+      List<FragmentMetadata> fragments =
+          writeFragments(allocator, batchWrite.getFragmentWriteSpec(), schema, 0, 25);
+      assertTrue(fragments.size() > 1);
+      assertFileFormatVersion("2.1", fragments);
+
+      batchWrite.commit(new WriterCommitMessage[] {LanceBatchWrite.taskCommit(fragments)});
+      assertEquals(expectedRows(0, 25), readRows(allocator, datasetUri));
+    }
+  }
+
+  /** A staged commit pinned to a file format version when it was staged makes the spec use it. */
+  @Test
+  public void testFragmentWriteSpecUsesStagedFileFormatVersion(TestInfo testInfo) throws Exception {
+    String datasetName = testInfo.getTestMethod().get().getName();
+    String datasetUri = TestUtils.getDatasetUri(tempDir.toString(), datasetName);
+    try (BufferAllocator allocator = new RootAllocator(Long.MAX_VALUE)) {
+      Schema schema = new Schema(Arrays.asList(intField("a"), intField("c")));
+      StagedCommit stagedCommit =
+          StagedCommit.forNewTable(
+              schema,
+              datasetUri,
+              StagedCommitOptions.pathBased(Collections.emptyMap(), false, "2.1"));
+      LanceBatchWrite batchWrite =
+          newBatchWrite(
+              LanceArrowUtils.fromArrowSchema(schema),
+              LanceSparkWriteOptions.from(datasetUri),
+              false,
+              stagedCommit);
+      FragmentWriteSpec spec = batchWrite.getFragmentWriteSpec();
+      // A staged create or replace commits as an overwrite.
+      assertEquals(Optional.of("OVERWRITE"), spec.toWriteParams().getMode());
+      assertEquals(Optional.of("2.1"), spec.toWriteParams().getDataStorageVersion());
+
+      List<FragmentMetadata> fragments = writeFragments(allocator, spec, schema, 0, 25);
+      assertFileFormatVersion("2.1", fragments);
+      batchWrite.commit(new WriterCommitMessage[] {LanceBatchWrite.taskCommit(fragments)});
+      stagedCommit.commit();
+
+      assertEquals(expectedRows(0, 25), readRows(allocator, datasetUri));
+      try (Dataset dataset = Dataset.open(datasetUri, allocator)) {
+        assertEquals("2.1", dataset.getLanceFileFormatVersion());
+      }
+    }
+  }
+
   private static Field intField(String name) {
     return new Field(name, FieldType.nullable(new ArrowType.Int(32, true)), null);
   }
@@ -547,15 +665,7 @@ public class LanceBatchWriteTest {
       int start,
       int rows) {
     try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
-      IntVector a = (IntVector) root.getVector("a");
-      IntVector c = (IntVector) root.getVector("c");
-      a.allocateNew(rows);
-      c.allocateNew(rows);
-      for (int i = 0; i < rows; i++) {
-        a.set(i, start + i);
-        c.set(i, 10 * (start + i));
-      }
-      root.setRowCount(rows);
+      fillRows(root, start, rows);
       return Fragment.write()
           .datasetUri(datasetUri)
           .allocator(allocator)
@@ -563,6 +673,43 @@ public class LanceBatchWriteTest {
           .mode(mode)
           .maxRowsPerFile(10)
           .execute();
+    }
+  }
+
+  /** Writes the same rows with the parameters of {@code spec}, as an external writer does. */
+  private static List<FragmentMetadata> writeFragments(
+      BufferAllocator allocator, FragmentWriteSpec spec, Schema schema, int start, int rows) {
+    try (VectorSchemaRoot root = VectorSchemaRoot.create(schema, allocator)) {
+      fillRows(root, start, rows);
+      return Fragment.write()
+          .datasetUri(spec.getDatasetUri())
+          .allocator(allocator)
+          .data(root)
+          .writeParams(spec.toWriteParams())
+          .execute();
+    }
+  }
+
+  private static void fillRows(VectorSchemaRoot root, int start, int rows) {
+    IntVector a = (IntVector) root.getVector("a");
+    IntVector c = (IntVector) root.getVector("c");
+    a.allocateNew(rows);
+    c.allocateNew(rows);
+    for (int i = 0; i < rows; i++) {
+      a.set(i, start + i);
+      c.set(i, 10 * (start + i));
+    }
+    root.setRowCount(rows);
+  }
+
+  private static void assertFileFormatVersion(String expected, List<FragmentMetadata> fragments) {
+    for (FragmentMetadata fragment : fragments) {
+      for (DataFile file : fragment.getFiles()) {
+        assertEquals(
+            expected,
+            file.getFileMajorVersion() + "." + file.getFileMinorVersion(),
+            file.getPath());
+      }
     }
   }
 

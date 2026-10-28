@@ -17,6 +17,7 @@ import org.lance.CommitBuilder;
 import org.lance.Dataset;
 import org.lance.FragmentMetadata;
 import org.lance.Transaction;
+import org.lance.WriteParams;
 import org.lance.memwal.ShardingSpec;
 import org.lance.namespace.LanceNamespace;
 import org.lance.operation.Append;
@@ -272,28 +273,55 @@ public class LanceBatchWrite implements BatchWrite {
   }
 
   /**
+   * Returns the Lance write parameters {@link #commit(WriterCommitMessage[])} expects for fragments
+   * an external writer produces, such as the resolved {@code file_format_version}. See {@link
+   * FragmentWriteSpec#toWriteParams()} for what they contain.
+   */
+  @Evolving
+  public FragmentWriteSpec getFragmentWriteSpec() {
+    LanceSparkWriteOptions fragmentWriteOptions =
+        writeOptions.toBuilder()
+            .writeMode(
+                isOverwrite() ? WriteParams.WriteMode.OVERWRITE : WriteParams.WriteMode.APPEND)
+            .enableStableRowIds(false)
+            .fileFormatVersion(effectiveFileFormatVersion())
+            .build();
+    return new FragmentWriteSpec(fragmentWriteOptions, initialStorageOptions);
+  }
+
+  /**
+   * The file format version this write resolves: the write option, or for a staged commit the
+   * version resolved when it was staged. Null means none was resolved, so fragments get Lance's
+   * default.
+   */
+  private String effectiveFileFormatVersion() {
+    String version = writeOptions.getFileFormatVersion();
+    if (version == null && stagedCommit != null) {
+      version = stagedCommit.getFileFormatVersion();
+    }
+    return version;
+  }
+
+  /**
    * Creates an opaque commit message for uncommitted fragments written for a target dataset.
    *
    * <p>The returned message must be passed to {@link #commit(WriterCommitMessage[])} on a {@code
    * LanceBatchWrite} for the same target dataset.
    *
-   * <p>{@code commit} does not check that the fragments match what it commits, and a mismatch can
-   * silently read back as wrong values or leave the table unreadable. Write the fragments the same
-   * way {@link LanceDataWriter} does, and pick the write mode from {@link #isOverwrite()} rather
-   * than from the query:
+   * <p>Write the fragments with the parameters of {@link #getFragmentWriteSpec()}. When {@link
+   * #isOverwrite()} is true, do not pass the table's schema to {@code
+   * WriteFragmentBuilder.schema(...)}, and give the stream the column types of {@link
+   * #getCommitSchema()}. Timestamps must use the same unit, integers the same width and signedness,
+   * and strings and binaries the same offset width. The stream may leave out a timestamp's time
+   * zone.
    *
-   * <ul>
-   *   <li>if {@link #isOverwrite()} is false, write in {@code WriteMode.APPEND}, not the default
-   *       {@code WriteMode.CREATE}, so the data files use the table's field ids; and
-   *   <li>if it is true, write in {@code WriteMode.OVERWRITE} without passing the table's schema to
-   *       {@code WriteFragmentBuilder.schema(...)}, and with the column types of {@link
-   *       #getCommitSchema()}. Timestamps must use the same unit, integers the same width and
-   *       signedness, and strings and binaries the same offset width. The stream may leave out a
-   *       timestamp's time zone.
-   * </ul>
+   * <p>{@code commit} does not validate these fragments: not their file format version, field ids
+   * or column types. Fragments written in the wrong mode, or with the wrong schema or types, can
+   * commit and then read back as nulls or wrong values, or leave the table unreadable.
    *
-   * <p>In both modes, reject a value outside an unsigned integer column's range, as {@link
-   * LanceDataWriter} does: narrowing it stores a different value, which Lance accepts.
+   * <p>Whether or not {@link #isOverwrite()} is true, reject a value outside an unsigned integer
+   * column's range, as {@link LanceDataWriter} does: narrowing it stores a different value, which
+   * Lance accepts.
    *
    * @param fragments uncommitted fragments produced by a task
    * @return a message accepted by {@link #commit(WriterCommitMessage[])}
