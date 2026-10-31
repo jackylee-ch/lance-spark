@@ -328,13 +328,15 @@ public class BlobUtils {
   }
 
   /**
-   * Rejects committing {@code operation} on {@code dataset} when the new version would reference a
-   * data file at file format {@value #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer that holds a legacy
-   * (v1) blob field. Lance 13 turns such a field into blob v2 on that commit, while files that
-   * Lance 12 or a fragment writer wrote keep the v1 layout, so the new version cannot be read. An
-   * overwrite only references the fragments it commits; any other operation also keeps the files of
-   * {@code dataset}. {@link LanceCommits} runs this before each connector commit. Remove once the
-   * connector uses a Lance release that reads that layout.
+   * Rejects committing {@code operation} on {@code dataset} when the files it keeps from {@code
+   * dataset}, or the fragments it adds, include a data file at file format {@value
+   * #MIN_BLOB_V2_FILE_FORMAT_VERSION} or newer that holds a legacy (v1) blob field. Lance 13 turns
+   * such a field into blob v2 on that commit, while files that Lance 12 or a fragment writer wrote
+   * keep the v1 layout, so the new version cannot be read. An overwrite only references the
+   * fragments it commits; any other operation also keeps the files of {@code dataset}. Lance builds
+   * the new version on its latest one, so a file another client commits after the version of {@code
+   * dataset} is not checked. {@link LanceCommits} runs this before each connector commit. Remove
+   * once the connector uses a Lance release that reads that layout.
    *
    * @param dataset the version {@code operation} is committed on; unused for an overwrite
    */

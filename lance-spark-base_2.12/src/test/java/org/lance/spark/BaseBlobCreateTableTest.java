@@ -1001,6 +1001,26 @@ public abstract class BaseBlobCreateTableTest {
         "OPTIMIZE %s");
   }
 
+  /**
+   * The connector wrote this table on Lance 12 (see {@code datagen.py}). Its only data files are
+   * 2.2 ones, yet the table reports 2.1, so the check reads each file's version.
+   */
+  @Test
+  public void testSparkWrittenLance12BlobV1TableRejectsCommits() throws Exception {
+    String uri = copyLance12Table("spark_append_22");
+    try (org.lance.Dataset dataset = org.lance.Dataset.open().uri(uri).build()) {
+      assertEquals(BlobUtils.MAX_BLOB_V1_FILE_FORMAT_VERSION, dataset.getLanceFileFormatVersion());
+    }
+    assertRejectedBeforeCommit(
+        uri,
+        catalogName + ".`" + uri + "`",
+        "[data]",
+        "INSERT INTO %s VALUES (3, X'03')",
+        "DELETE FROM %s WHERE id = 1",
+        "ALTER TABLE %s CREATE INDEX id_idx USING btree (id)",
+        "ALTER TABLE %s SET TBLPROPERTIES ('note' = 'x')");
+  }
+
   @Test
   public void testBlobV1TableWithoutTwoTwoFilesAcceptsCommits() {
     String fullName = catalogName + ".default.blob_v1_commits_" + System.currentTimeMillis();

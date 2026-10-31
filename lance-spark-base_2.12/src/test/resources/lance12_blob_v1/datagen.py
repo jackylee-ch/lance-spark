@@ -6,6 +6,10 @@ each table holds the v1 layout in a 2.2 data file next to a 2.1 one. Lance 13 tu
 into blob v2 on the next commit that keeps that file, and the new version cannot be read.
 
 Run with pylance 12.0.0; it rewrites both tables next to this script.
+
+spark_append_22.lance is not written here: lance-spark 0.9.0-beta.2, on Lance 12, created it at
+2.1 with a v1 blob column and appended two rows to it with file_format_version 2.2, so the table
+reports 2.1 while its only data files are 2.2 ones.
 """
 
 import shutil

@@ -23,9 +23,10 @@ import java.util.function.Supplier;
 /**
  * The connector's commits to an existing table. Writes and commands commit through different Lance
  * calls, and some commands commit inside a Lance call such as {@code createIndex}, so each commit
- * goes through one of these methods. They check what the new version would reference right before
- * Lance commits it, so no write or command has to check the table on its own. Creating a table
- * through {@code Dataset.write} adds no data files and commits directly.
+ * goes through one of these methods. Before each commit call they check the data files of the
+ * version a write or command started from, and the files it adds, so no write or command has to
+ * check the table on its own. Creating a table through {@code Dataset.write} adds no data files and
+ * commits directly.
  */
 public final class LanceCommits {
 
